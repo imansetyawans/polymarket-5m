@@ -98,7 +98,7 @@ def _make_market_panel(state: dict) -> Panel:
 
 
 def _make_price_panel(state: dict) -> Panel:
-    """BTC current price (Chainlink) and gap vs price-to-beat."""
+    """BTC current price (Binance) and gap vs price-to-beat."""
     btc = state.get("btc_price")
     window = state.get("window")
 
@@ -126,7 +126,7 @@ def _make_price_panel(state: dict) -> Panel:
     else:
         table.add_row("Gap", "[dim]—[/]")
 
-    return Panel(table, title="[bold]₿ BTC Price (Chainlink)[/]", border_style=BORDER, height=7)
+    return Panel(table, title="[bold]₿ BTC Price (Binance)[/]", border_style=BORDER, height=7)
 
 
 def config_gap_trigger() -> float:
