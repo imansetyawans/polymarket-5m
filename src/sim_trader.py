@@ -123,10 +123,14 @@ class SimPortfolio:
 async def _resolve_window_outcome(slug: str) -> Optional[str]:
     """
     Poll Gamma API until the window resolves. Returns "UP" or "DOWN".
+
+    NOTE: Gamma API can take several minutes to set `closed: True`.
+    Instead we check if outcomePrices are settled (near 0 or 1) which
+    happens much faster.
     """
     url = f"{config.GAMMA_API_HOST}/events"
     async with aiohttp.ClientSession() as session:
-        for _ in range(60):  # try for up to 60 seconds
+        for attempt in range(150):  # try for up to 5 minutes (150 × 2s)
             try:
                 async with session.get(url, params={"slug": slug}) as resp:
                     if resp.status != 200:
@@ -139,45 +143,57 @@ async def _resolve_window_outcome(slug: str) -> Optional[str]:
                     continue
 
                 event = events[0]
-                if not event.get("closed", False):
-                    await asyncio.sleep(2)
-                    continue
-
-                # Window is closed — check the market outcome
                 markets = event.get("markets", [])
                 if not markets:
-                    return None
+                    await asyncio.sleep(2)
+                    continue
 
                 mkt = markets[0]
                 outcome_prices = mkt.get("outcomePrices", "")
                 if isinstance(outcome_prices, str):
+                    if not outcome_prices:
+                        await asyncio.sleep(2)
+                        continue
                     outcome_prices = json.loads(outcome_prices)
 
-                # outcomePrices[0] = UP price, outcomePrices[1] = DOWN price
-                # Winner has price = 1.0, loser has price = 0.0
-                outcomes = mkt.get("outcomes", [])
-                up_price = float(outcome_prices[0]) if outcome_prices else 0
-                down_price = float(outcome_prices[1]) if len(outcome_prices) > 1 else 0
-
-                log.info(
-                    "SIM RESOLVE %s: outcomes=%s prices=%s → UP=%.1f DOWN=%.1f",
-                    slug, outcomes, outcome_prices, up_price, down_price,
-                )
-
-                if up_price > 0.5:
-                    return "UP"
-                elif down_price > 0.5:
-                    return "DOWN"
-                else:
-                    # Not yet fully resolved, keep polling
+                if not outcome_prices or len(outcome_prices) < 2:
                     await asyncio.sleep(2)
                     continue
 
+                outcomes = mkt.get("outcomes", [])
+                up_price = float(outcome_prices[0])
+                down_price = float(outcome_prices[1])
+
+                # Check if prices are settled (one near 1, the other near 0)
+                # During active trading, prices are like 0.50/0.50 or 0.85/0.15
+                # After resolution, they become exactly 0/1 or 1/0
+                # We use 0.95 threshold to detect near-settled state
+                if up_price >= 0.95:
+                    log.info(
+                        "SIM RESOLVE %s: outcomes=%s prices=[%.3f, %.3f] → UP won",
+                        slug, outcomes, up_price, down_price,
+                    )
+                    return "UP"
+                elif down_price >= 0.95:
+                    log.info(
+                        "SIM RESOLVE %s: outcomes=%s prices=[%.3f, %.3f] → DOWN won",
+                        slug, outcomes, up_price, down_price,
+                    )
+                    return "DOWN"
+
+                # Prices not yet settled — keep polling
+                if attempt % 15 == 14:
+                    log.debug(
+                        "SIM: Still waiting for %s to settle (attempt %d, prices=[%.3f, %.3f])",
+                        slug, attempt + 1, up_price, down_price,
+                    )
+
             except Exception as e:
                 log.debug("Resolve poll error for %s: %s", slug, e)
-                await asyncio.sleep(2)
 
-    log.warning("Timed out waiting for %s to resolve", slug)
+            await asyncio.sleep(2)
+
+    log.warning("Timed out waiting for %s to resolve after 5 minutes", slug)
     return None
 
 
