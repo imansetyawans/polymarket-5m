@@ -17,11 +17,62 @@ from typing import Optional, List
 import json
 
 import aiohttp
+from web3 import Web3
 from src import config
 
 log = logging.getLogger("polybot")
 
 WINDOW_DURATION = 300  # 5 minutes in seconds
+
+# --- Chainlink Oracle Fallback Configuration ---
+CHAINLINK_BTC_USD = "0xc907E116054Ad103354f2D350FD2514433D57F6f"
+
+CHAINLINK_ABI = [
+    {
+        "inputs": [],
+        "name": "latestRoundData",
+        "outputs": [
+            {"name": "roundId", "type": "uint80"},
+            {"name": "answer", "type": "int256"},
+            {"name": "startedAt", "type": "uint256"},
+            {"name": "updatedAt", "type": "uint256"},
+            {"name": "answeredInRound", "type": "uint80"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "decimals",
+        "outputs": [{"name": "", "type": "uint8"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+POLYGON_RPCS = [
+    "https://polygon.drpc.org",
+    "https://polygon-bor-rpc.publicnode.com",
+]
+
+def fetch_chainlink_btc_sync() -> Optional[float]:
+    """Synchronous Chainlink BTC/USD price read for precise PriceToBeat fallbacks."""
+    for rpc in POLYGON_RPCS:
+        try:
+            w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 5}))
+            if w3.is_connected():
+                contract = w3.eth.contract(
+                    address=Web3.to_checksum_address(CHAINLINK_BTC_USD),
+                    abi=CHAINLINK_ABI,
+                )
+                decimals = contract.functions.decimals().call()
+                data = contract.functions.latestRoundData().call()
+                price = data[1] / (10 ** decimals)
+                return price if price > 0 else None
+        except Exception as e:
+            log.debug("Chainlink RPC %s failed: %s", rpc, e)
+            continue
+    return None
 
 
 @dataclass
@@ -244,16 +295,17 @@ async def market_discovery_loop(state: dict) -> None:
                         window.price_to_beat = ptb
                     else:
                         # FALLBACK: If the previous window hasn't resolved on the Gamma API,
-                        # and we are strictly inside the new window's time, lock our local BTC price 
-                        # instead of infinitely waiting and missing trades.
+                        # and we are strictly inside the new window's time, fetch the EXACT 
+                        # Chainlink Oracle price directly from Polygon (which is what Polymarket uses).
                         now = datetime.now(timezone.utc)
                         if now >= window.start_date:
-                            local_btc = state.get("btc_price", 0)
-                            if local_btc > 0:
-                                window.price_to_beat = local_btc
+                            loop = asyncio.get_event_loop()
+                            oracle_price = await loop.run_in_executor(None, fetch_chainlink_btc_sync)
+                            if oracle_price is not None and oracle_price > 0:
+                                window.price_to_beat = oracle_price
                                 log.warning(
-                                    "Gamma API delayed. Falling back to local BTC price %s for %s",
-                                    local_btc, window.slug
+                                    "Gamma API delayed. Fetched strict Chainlink Oracle price %s for %s",
+                                    oracle_price, window.slug
                                 )
 
                 # Preserve priceToBeat from previous iteration (already found)
