@@ -31,7 +31,7 @@ class SimPortfolio:
         self.trades: list = []
         self.wins = 0
         self.losses = 0
-        self.pending_trade: Optional[dict] = None
+        self.pending_trades: dict = {}  # slug -> trade dict
 
     @property
     def total_trades(self) -> int:
@@ -63,16 +63,16 @@ class SimPortfolio:
             "pnl": 0.0,
         }
         self.balance -= size
-        self.pending_trade = trade
+        self.pending_trades[slug] = trade
         self.trades.append(trade)
         return trade
 
-    def resolve_trade(self, winning_side: str) -> Optional[dict]:
-        """Resolve the pending trade based on the market outcome."""
-        if not self.pending_trade:
+    def resolve_trade(self, slug: str, winning_side: str) -> Optional[dict]:
+        """Resolve a specific trade by slug based on the market outcome."""
+        trade = self.pending_trades.pop(slug, None)
+        if not trade:
             return None
 
-        trade = self.pending_trade
         if trade["side"] == winning_side:
             # Winner — each token pays $1.00
             payout = trade["tokens"] * 1.0
@@ -86,14 +86,11 @@ class SimPortfolio:
             trade["status"] = "LOST"
             self.losses += 1
 
-        self.pending_trade = None
         return trade
 
     def get_equity_dict(self) -> dict:
         """Return equity info compatible with the dashboard."""
-        pending_value = 0.0
-        if self.pending_trade:
-            pending_value = self.pending_trade["size_usdc"]
+        pending_value = sum(t["size_usdc"] for t in self.pending_trades.values())
         return {
             "usdc_balance": self.balance,
             "winning_value": pending_value,
@@ -103,8 +100,7 @@ class SimPortfolio:
     def get_positions_list(self) -> list:
         """Return positions compatible with the dashboard."""
         positions = []
-        if self.pending_trade:
-            t = self.pending_trade
+        for t in self.pending_trades.values():
             positions.append({
                 "market": t["slug"][-20:],
                 "side": f"BUY {t['side']}",
@@ -159,8 +155,14 @@ async def _resolve_window_outcome(slug: str) -> Optional[str]:
 
                 # outcomePrices[0] = UP price, outcomePrices[1] = DOWN price
                 # Winner has price = 1.0, loser has price = 0.0
+                outcomes = mkt.get("outcomes", [])
                 up_price = float(outcome_prices[0]) if outcome_prices else 0
                 down_price = float(outcome_prices[1]) if len(outcome_prices) > 1 else 0
+
+                log.info(
+                    "SIM RESOLVE %s: outcomes=%s prices=%s → UP=%.1f DOWN=%.1f",
+                    slug, outcomes, outcome_prices, up_price, down_price,
+                )
 
                 if up_price > 0.5:
                     return "UP"
@@ -319,23 +321,26 @@ async def _resolve_and_update(portfolio: SimPortfolio, state: dict, slug: str) -
     winner = await _resolve_window_outcome(slug)
 
     if winner:
-        trade = portfolio.resolve_trade(winner)
+        trade = portfolio.resolve_trade(slug, winner)
         if trade:
             pnl_str = f"+${trade['pnl']:.2f}" if trade["pnl"] >= 0 else f"-${abs(trade['pnl']):.2f}"
             result = "✅ WON" if trade["status"] == "WON" else "❌ LOST"
             log.info(
-                "SIM RESULT: %s | %s won | PnL: %s | Balance: $%.2f | W/L: %d/%d (%.0f%%)",
-                result, winner, pnl_str, portfolio.balance,
+                "SIM RESULT: %s | bought %s, %s won | PnL: %s | Balance: $%.2f | W/L: %d/%d (%.0f%%)",
+                result, trade["side"], winner, pnl_str, portfolio.balance,
                 portfolio.wins, portfolio.losses, portfolio.win_rate,
             )
             state["last_trade"] = (
                 f"{result} {trade['side']} @ {trade['entry_price']:.4f} | "
                 f"PnL: {pnl_str} | Bal: ${portfolio.balance:.2f}"
             )
+        else:
+            log.warning("SIM: Trade for %s not found in pending — may have been resolved already", slug)
     else:
         log.warning("SIM: Could not resolve %s — treating as loss", slug)
-        portfolio.resolve_trade("UNKNOWN")
+        portfolio.resolve_trade(slug, "UNKNOWN")
         state["last_trade"] = f"SIM: Resolution timeout for {slug}"
 
     state["equity"] = portfolio.get_equity_dict()
     state["positions"] = portfolio.get_positions_list()
+
