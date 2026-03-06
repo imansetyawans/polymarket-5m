@@ -161,25 +161,26 @@ async def _resolve_window_outcome(slug: str) -> Optional[str]:
                     continue
 
                 outcomes = mkt.get("outcomes", [])
-                up_price = float(outcome_prices[0])
-                down_price = float(outcome_prices[1])
-
-                # Check if prices are settled (one near 1, the other near 0)
-                # During active trading, prices are like 0.50/0.50 or 0.85/0.15
-                # After resolution, they become exactly 0/1 or 1/0
-                # We use 0.95 threshold to detect near-settled state
-                if up_price >= 0.95:
+                
+                # Find which outcome has settled to >= 0.95
+                winning_outcome = None
+                for idx, price_str in enumerate(outcome_prices):
+                    try:
+                        price = float(price_str)
+                        if price >= 0.95:
+                            # Usually "Up" or "Down" -> uppercase it to match "UP"/"DOWN" side
+                            if idx < len(outcomes):
+                                winning_outcome = str(outcomes[idx]).upper()
+                            break
+                    except ValueError:
+                        continue
+                        
+                if winning_outcome:
                     log.info(
-                        "SIM RESOLVE %s: outcomes=%s prices=[%.3f, %.3f] → UP won",
-                        slug, outcomes, up_price, down_price,
+                        "SIM RESOLVE %s: outcomes=%s prices=%s → %s won",
+                        slug, outcomes, outcome_prices, winning_outcome
                     )
-                    return "UP"
-                elif down_price >= 0.95:
-                    log.info(
-                        "SIM RESOLVE %s: outcomes=%s prices=[%.3f, %.3f] → DOWN won",
-                        slug, outcomes, up_price, down_price,
-                    )
-                    return "DOWN"
+                    return winning_outcome
 
                 # Prices not yet settled — keep polling
                 if attempt % 15 == 14:
