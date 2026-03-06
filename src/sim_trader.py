@@ -1,0 +1,341 @@
+"""
+Simulation trader — paper trading with virtual balance using real market data.
+
+Uses the same entry strategies as the real trader (primary T-5s, secondary gap trigger)
+but simulates trades with a virtual balance. Waits for window resolution from Gamma API
+to determine win/loss and update P&L.
+"""
+
+import logging
+import asyncio
+import time
+import json
+from datetime import datetime, timezone
+from typing import Optional
+
+import aiohttp
+from src import config
+
+log = logging.getLogger("polybot")
+
+# Minimum simulated order size
+SIM_MIN_ORDER_SIZE = 0.10
+
+
+class SimPortfolio:
+    """Virtual portfolio tracker for simulation mode."""
+
+    def __init__(self, starting_balance: float = 10.0):
+        self.balance = starting_balance
+        self.starting_balance = starting_balance
+        self.trades: list = []
+        self.wins = 0
+        self.losses = 0
+        self.pending_trade: Optional[dict] = None
+
+    @property
+    def total_trades(self) -> int:
+        return self.wins + self.losses
+
+    @property
+    def win_rate(self) -> float:
+        return (self.wins / self.total_trades * 100) if self.total_trades > 0 else 0
+
+    @property
+    def pnl(self) -> float:
+        return self.balance - self.starting_balance
+
+    @property
+    def pnl_pct(self) -> float:
+        return (self.pnl / self.starting_balance * 100) if self.starting_balance > 0 else 0
+
+    def place_trade(self, side: str, price: float, size: float, slug: str) -> dict:
+        """Simulate placing a trade. Returns the trade record."""
+        tokens_bought = size / price if price > 0 else 0
+        trade = {
+            "slug": slug,
+            "side": side,           # "UP" or "DOWN"
+            "entry_price": price,   # odds at entry (e.g. 0.85)
+            "size_usdc": size,      # USDC spent
+            "tokens": tokens_bought,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": "OPEN",
+            "pnl": 0.0,
+        }
+        self.balance -= size
+        self.pending_trade = trade
+        self.trades.append(trade)
+        return trade
+
+    def resolve_trade(self, winning_side: str) -> Optional[dict]:
+        """Resolve the pending trade based on the market outcome."""
+        if not self.pending_trade:
+            return None
+
+        trade = self.pending_trade
+        if trade["side"] == winning_side:
+            # Winner — each token pays $1.00
+            payout = trade["tokens"] * 1.0
+            trade["pnl"] = payout - trade["size_usdc"]
+            trade["status"] = "WON"
+            self.balance += payout
+            self.wins += 1
+        else:
+            # Loser — tokens worth $0
+            trade["pnl"] = -trade["size_usdc"]
+            trade["status"] = "LOST"
+            self.losses += 1
+
+        self.pending_trade = None
+        return trade
+
+    def get_equity_dict(self) -> dict:
+        """Return equity info compatible with the dashboard."""
+        pending_value = 0.0
+        if self.pending_trade:
+            pending_value = self.pending_trade["size_usdc"]
+        return {
+            "usdc_balance": self.balance,
+            "winning_value": pending_value,
+            "total": self.balance + pending_value,
+        }
+
+    def get_positions_list(self) -> list:
+        """Return positions compatible with the dashboard."""
+        positions = []
+        if self.pending_trade:
+            t = self.pending_trade
+            positions.append({
+                "market": t["slug"][-20:],
+                "side": f"BUY {t['side']}",
+                "size": t["size_usdc"],
+                "status": "PENDING",
+            })
+        # Show last 4 resolved trades
+        for t in reversed(self.trades):
+            if t["status"] in ("WON", "LOST") and len(positions) < 5:
+                pnl_str = f"+${t['pnl']:.2f}" if t["pnl"] > 0 else f"-${abs(t['pnl']):.2f}"
+                positions.append({
+                    "market": t["slug"][-20:],
+                    "side": f"BUY {t['side']}",
+                    "size": t["size_usdc"],
+                    "status": f"{t['status']} ({pnl_str})",
+                })
+        return positions
+
+
+async def _resolve_window_outcome(slug: str) -> Optional[str]:
+    """
+    Poll Gamma API until the window resolves. Returns "UP" or "DOWN".
+    """
+    url = f"{config.GAMMA_API_HOST}/events"
+    async with aiohttp.ClientSession() as session:
+        for _ in range(60):  # try for up to 60 seconds
+            try:
+                async with session.get(url, params={"slug": slug}) as resp:
+                    if resp.status != 200:
+                        await asyncio.sleep(2)
+                        continue
+                    events = await resp.json()
+
+                if not events:
+                    await asyncio.sleep(2)
+                    continue
+
+                event = events[0]
+                if not event.get("closed", False):
+                    await asyncio.sleep(2)
+                    continue
+
+                # Window is closed — check the market outcome
+                markets = event.get("markets", [])
+                if not markets:
+                    return None
+
+                mkt = markets[0]
+                outcome_prices = mkt.get("outcomePrices", "")
+                if isinstance(outcome_prices, str):
+                    outcome_prices = json.loads(outcome_prices)
+
+                # outcomePrices[0] = UP price, outcomePrices[1] = DOWN price
+                # Winner has price = 1.0, loser has price = 0.0
+                up_price = float(outcome_prices[0]) if outcome_prices else 0
+                down_price = float(outcome_prices[1]) if len(outcome_prices) > 1 else 0
+
+                if up_price > 0.5:
+                    return "UP"
+                elif down_price > 0.5:
+                    return "DOWN"
+                else:
+                    # Not yet fully resolved, keep polling
+                    await asyncio.sleep(2)
+                    continue
+
+            except Exception as e:
+                log.debug("Resolve poll error for %s: %s", slug, e)
+                await asyncio.sleep(2)
+
+    log.warning("Timed out waiting for %s to resolve", slug)
+    return None
+
+
+async def sim_trade_loop(portfolio: SimPortfolio, state: dict) -> None:
+    """
+    Simulation trade loop — mirrors the real trader logic but uses virtual balance.
+    After each trade, waits for window resolution to determine win/loss.
+    """
+    while True:
+        window = state.get("window")
+        if not window:
+            await asyncio.sleep(0.5)
+            continue
+
+        # Already traded this window?
+        if state.get("window_locked", False):
+            await asyncio.sleep(0.5)
+            continue
+
+        now = datetime.now(timezone.utc)
+        seconds_to_close = (window.end_date - now).total_seconds()
+
+        # Update state for dashboard
+        state["seconds_to_close"] = seconds_to_close
+
+        # Update equity from sim portfolio
+        state["equity"] = portfolio.get_equity_dict()
+        state["positions"] = portfolio.get_positions_list()
+
+        # ── SECONDARY ENTRY: gap trigger (T-60s to T-5s) ────────
+        if config.GAP_TRIGGER_SECONDS_BEFORE_CLOSE >= seconds_to_close > config.ENTRY_SECONDS_BEFORE_CLOSE:
+            btc_price = state.get("btc_price", 0)
+            if btc_price > 0 and window.price_to_beat > 0:
+                gap = abs(btc_price - window.price_to_beat)
+                state["gap"] = gap
+
+                if gap > config.GAP_TRIGGER_USD:
+                    log.info(
+                        "SIM GAP TRIGGER! gap=$%.2f > $%.2f at T-%.1fs",
+                        gap, config.GAP_TRIGGER_USD, seconds_to_close,
+                    )
+
+                    up_odds = state.get("up_odds", 0)
+                    down_odds = state.get("down_odds", 0)
+
+                    if up_odds >= down_odds and up_odds > 0:
+                        side, price = "UP", up_odds
+                    elif down_odds > 0:
+                        side, price = "DOWN", down_odds
+                    else:
+                        await asyncio.sleep(0.5)
+                        continue
+
+                    trade_size = _sim_trade_size(portfolio)
+                    if trade_size < SIM_MIN_ORDER_SIZE:
+                        state["last_trade"] = f"SIM SKIP — balance too low (${portfolio.balance:.2f})"
+                        state["window_locked"] = True
+                        continue
+
+                    trade = portfolio.place_trade(side, price, trade_size, window.slug)
+                    log.info(
+                        "SIM TRADE: BUY %s @ %.4f | $%.2f | tokens=%.2f",
+                        side, price, trade_size, trade["tokens"],
+                    )
+                    state["last_trade"] = f"SIM BUY {side} @ {price:.4f} | ${trade_size:.2f}"
+                    state["equity"] = portfolio.get_equity_dict()
+                    state["positions"] = portfolio.get_positions_list()
+                    state["window_locked"] = True
+
+                    # Resolve asynchronously
+                    asyncio.create_task(_resolve_and_update(portfolio, state, window.slug))
+                    continue
+
+        # ── PRIMARY ENTRY: T-5s ──────────────────────────────────
+        if 0 < seconds_to_close <= config.ENTRY_SECONDS_BEFORE_CLOSE + 0.1:
+            target_time = window.end_date.timestamp() - config.ENTRY_SECONDS_BEFORE_CLOSE
+            now_perf = time.time()
+
+            if now_perf < target_time:
+                wait = target_time - now_perf
+                if wait > 0:
+                    ref = time.perf_counter()
+                    while (time.perf_counter() - ref) < wait:
+                        await asyncio.sleep(0.001)
+
+            log.info("SIM PRIMARY ENTRY at T-%.3fs", seconds_to_close)
+
+            up_odds = state.get("up_odds", 0)
+            down_odds = state.get("down_odds", 0)
+
+            if up_odds >= down_odds and up_odds > 0:
+                side, price = "UP", up_odds
+            elif down_odds > 0:
+                side, price = "DOWN", down_odds
+            else:
+                log.warning("SIM: No odds available — skipping")
+                state["last_trade"] = "SIM SKIP — no odds available"
+                state["window_locked"] = True
+                continue
+
+            trade_size = _sim_trade_size(portfolio)
+            if trade_size < SIM_MIN_ORDER_SIZE:
+                state["last_trade"] = f"SIM SKIP — balance too low (${portfolio.balance:.2f})"
+                state["window_locked"] = True
+                continue
+
+            trade = portfolio.place_trade(side, price, trade_size, window.slug)
+            log.info(
+                "SIM TRADE: BUY %s @ %.4f | $%.2f | tokens=%.2f",
+                side, price, trade_size, trade["tokens"],
+            )
+            state["last_trade"] = f"SIM BUY {side} @ {price:.4f} | ${trade_size:.2f}"
+            state["equity"] = portfolio.get_equity_dict()
+            state["positions"] = portfolio.get_positions_list()
+            state["window_locked"] = True
+
+            # Resolve asynchronously
+            asyncio.create_task(_resolve_and_update(portfolio, state, window.slug))
+            continue
+
+        # Window close passed
+        if seconds_to_close <= 0:
+            await asyncio.sleep(1)
+            continue
+
+        await asyncio.sleep(0.1)
+
+
+def _sim_trade_size(portfolio: SimPortfolio) -> float:
+    """Calculate sim trade size using config settings."""
+    if config.TRADE_AMOUNT_MODE == "fixed":
+        return min(config.TRADE_AMOUNT_VALUE, portfolio.balance)
+
+    size = (config.TRADE_AMOUNT_VALUE / 100.0) * portfolio.balance
+    return round(min(size, portfolio.balance), 2)
+
+
+async def _resolve_and_update(portfolio: SimPortfolio, state: dict, slug: str) -> None:
+    """Wait for window resolution, then update portfolio and state."""
+    log.info("SIM: Waiting for %s to resolve...", slug)
+    winner = await _resolve_window_outcome(slug)
+
+    if winner:
+        trade = portfolio.resolve_trade(winner)
+        if trade:
+            pnl_str = f"+${trade['pnl']:.2f}" if trade["pnl"] >= 0 else f"-${abs(trade['pnl']):.2f}"
+            result = "✅ WON" if trade["status"] == "WON" else "❌ LOST"
+            log.info(
+                "SIM RESULT: %s | %s won | PnL: %s | Balance: $%.2f | W/L: %d/%d (%.0f%%)",
+                result, winner, pnl_str, portfolio.balance,
+                portfolio.wins, portfolio.losses, portfolio.win_rate,
+            )
+            state["last_trade"] = (
+                f"{result} {trade['side']} @ {trade['entry_price']:.4f} | "
+                f"PnL: {pnl_str} | Bal: ${portfolio.balance:.2f}"
+            )
+    else:
+        log.warning("SIM: Could not resolve %s — treating as loss", slug)
+        portfolio.resolve_trade("UNKNOWN")
+        state["last_trade"] = f"SIM: Resolution timeout for {slug}"
+
+    state["equity"] = portfolio.get_equity_dict()
+    state["positions"] = portfolio.get_positions_list()
