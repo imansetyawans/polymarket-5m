@@ -242,6 +242,19 @@ async def market_discovery_loop(state: dict) -> None:
                     ptb = await _fetch_previous_price_to_beat(session, window.slug)
                     if ptb > 0:
                         window.price_to_beat = ptb
+                    else:
+                        # FALLBACK: If the previous window hasn't resolved on the Gamma API,
+                        # and we are strictly inside the new window's time, lock our local BTC price 
+                        # instead of infinitely waiting and missing trades.
+                        now = datetime.now(timezone.utc)
+                        if now >= window.start_date:
+                            local_btc = state.get("btc_price", 0)
+                            if local_btc > 0:
+                                window.price_to_beat = local_btc
+                                log.warning(
+                                    "Gamma API delayed. Falling back to local BTC price %s for %s",
+                                    local_btc, window.slug
+                                )
 
                 # Preserve priceToBeat from previous iteration (already found)
                 if (window.price_to_beat == 0
