@@ -135,33 +135,60 @@ def config_gap_trigger() -> float:
 
 
 def _make_odds_panel(state: dict) -> Panel:
-    """UP/DOWN odds display."""
+    """Quantitative Strategy Display."""
     up = state.get("up_odds", 0)
     down = state.get("down_odds", 0)
+    
+    p_true = state.get("p_true")
+    edge = state.get("edge")
+    ev = state.get("ev")
+    side = state.get("signal_side")
+    reason = state.get("signal_reason")
 
     table = Table(show_header=False, expand=True, padding=(0, 1), box=None)
     table.add_column("label", style="bold", width=18)
     table.add_column("value")
 
-    # Highlight the higher odds
+    # Raw Odds
     if up > down:
-        up_style = f"bold {UP_COLOR}"
-        down_style = DIM
-        pick = f"[{UP_COLOR} bold]⬆ UP is favored[/]"
+        up_style, down_style = f"bold {UP_COLOR}", DIM
     elif down > up:
-        up_style = DIM
-        down_style = f"bold {DOWN_COLOR}"
-        pick = f"[{DOWN_COLOR} bold]⬇ DOWN is favored[/]"
+        up_style, down_style = DIM, f"bold {DOWN_COLOR}"
     else:
-        up_style = ACCENT
-        down_style = ACCENT
-        pick = "[dim]Neutral[/]"
+        up_style = down_style = ACCENT
 
-    table.add_row("UP Odds", f"[{up_style}]{up:.4f}[/]" if up else "[dim]—[/]")
-    table.add_row("DOWN Odds", f"[{down_style}]{down:.4f}[/]" if down else "[dim]—[/]")
-    table.add_row("Signal", pick if (up or down) else "[dim]Waiting...[/]")
+    table.add_row("UP / DOWN Odds", f"[{up_style}]{up:.4f}[/] / [{down_style}]{down:.4f}[/]" if (up or down) else "[dim]—[/]")
 
-    return Panel(table, title="[bold]🎰 Token Odds[/]", border_style=BORDER, height=7)
+    # Quantitative Metrics
+    if edge is not None and ev is not None:
+        edge_pct = edge * 100
+        edge_color = "bright_green" if edge > 0 else "bright_red"
+        ev_color = "bright_green" if ev > 0 else "bright_red"
+        
+        table.add_row("Est. p_true", f"{p_true:.4f}" if p_true else "[dim]—[/]")
+        table.add_row("Edge", f"[{edge_color}]{edge_pct:+.2f}%[/]")
+        table.add_row("Expected Value", f"[{ev_color}]{ev:+.4f}[/]")
+    else:
+        table.add_row("Est. p_true", "[dim]—[/]")
+        table.add_row("Edge", "[dim]—[/]")
+        table.add_row("Expected Value", "[dim]—[/]")
+
+    # Signal
+    if side == "UP":
+        signal_color = f"bold {UP_COLOR}"
+        symbol = "⬆"
+    elif side == "DOWN":
+        signal_color = f"bold {DOWN_COLOR}"
+        symbol = "⬇"
+    else:
+        signal_color = DIM
+        symbol = "○"
+
+    signal_text = f"[{signal_color}]{symbol} {side}[/]" if side else "[dim]Waiting...[/]"
+    table.add_row("Target Side", signal_text)
+    table.add_row("Signal Status", reason if reason else "[dim]Evaluating...[/]")
+
+    return Panel(table, title="[bold]📈 Quant Strategy[/]", border_style=BORDER, height=9)
 
 
 def _make_equity_panel(state: dict) -> Panel:

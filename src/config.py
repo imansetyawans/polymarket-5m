@@ -28,6 +28,11 @@ GAP_TRIGGER_USD: float = float(os.getenv("GAP_TRIGGER_USD", "120"))
 ENTRY_SECONDS_BEFORE_CLOSE: float = float(os.getenv("ENTRY_SECONDS_BEFORE_CLOSE", "5"))
 GAP_TRIGGER_SECONDS_BEFORE_CLOSE: float = float(os.getenv("GAP_TRIGGER_SECONDS_BEFORE_CLOSE", "60"))
 
+# ── Quantitative Strategy Settings ───────────────────────────────
+EDGE_THRESHOLD: float = float(os.getenv("EDGE_THRESHOLD", "0.07"))
+KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.5"))
+BTC_VOLATILITY_PER_SEC: float = float(os.getenv("BTC_VOLATILITY_PER_SEC", "2.50"))
+
 # ── Contract Addresses (Polygon) ────────────────────────────────
 USDC_ADDRESS: str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 CONDITIONAL_TOKENS_ADDRESS: str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"

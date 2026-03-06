@@ -122,12 +122,14 @@ async def _execute_fok_order(
 
 async def trade_loop(client: ClobClient, state: dict) -> None:
     """
-    Main trade execution loop:
-      1. Wait for an active market window
-      2. During T-60s → T-5s: check gap trigger (secondary strategy)
-      3. At T-5s: execute primary strategy
-      4. Lock window after any trade
+    Main trade execution loop using quantitative Edge-EV-Kelly strategy.
+      - Wait for active market window
+      - Apply strategy at gap trigger and primary entry timings
+      - Lock window after any trade
     """
+    from src.strategy import evaluate_market
+    from src.equity import get_total_equity
+
     while True:
         window = state.get("window")
         if not window:
@@ -141,84 +143,107 @@ async def trade_loop(client: ClobClient, state: dict) -> None:
 
         now = datetime.now(timezone.utc)
         seconds_to_close = (window.end_date - now).total_seconds()
-
-        # Update state for dashboard
         state["seconds_to_close"] = seconds_to_close
 
-        # ── SECONDARY ENTRY: gap trigger (T-60s to T-5s) ────────
-        if config.GAP_TRIGGER_SECONDS_BEFORE_CLOSE >= seconds_to_close > config.ENTRY_SECONDS_BEFORE_CLOSE:
-            btc_price = state.get("btc_price", 0)
+        # Check if we are within any trigger window
+        is_primary = (0 < seconds_to_close <= config.ENTRY_SECONDS_BEFORE_CLOSE + 0.1)
+        is_secondary = (config.GAP_TRIGGER_SECONDS_BEFORE_CLOSE >= seconds_to_close > config.ENTRY_SECONDS_BEFORE_CLOSE)
+        
+        if not (is_primary or is_secondary):
+            if seconds_to_close <= 0:
+                await asyncio.sleep(1)
+            else:
+                await asyncio.sleep(0.1)
+            continue
+
+        # Evaluate strategy
+        btc_price = state.get("btc_price", 0)
+        up_odds = state.get("up_odds", 0)
+        down_odds = state.get("down_odds", 0)
+        positions = state.get("positions", [])
+        
+        if is_secondary:
             if btc_price > 0 and window.price_to_beat > 0:
                 gap = abs(btc_price - window.price_to_beat)
                 state["gap"] = gap
-
-                if gap > config.GAP_TRIGGER_USD:
-                    log.info(
-                        "GAP TRIGGER! gap=$%.2f > $%.2f threshold at T-%.1fs",
-                        gap, config.GAP_TRIGGER_USD, seconds_to_close,
-                    )
-
-                    # Determine which token has the highest price (most likely winner)
-                    prices = _get_token_prices(client, window.up_token_id, window.down_token_id)
-                    state["up_odds"] = prices["up"]
-                    state["down_odds"] = prices["down"]
-
-                    if prices["up"] >= prices["down"]:
-                        token_id = window.up_token_id
-                        token_label = "UP"
-                    else:
-                        token_id = window.down_token_id
-                        token_label = "DOWN"
-
-                    trade_size = _calculate_trade_size(client, state.get("positions", []))
-                    await _execute_fok_order(client, token_id, token_label, trade_size, state)
-
-                    # Lock this window
-                    state["window_locked"] = True
-                    log.info("Window locked — no further trades this window")
+                if gap <= config.GAP_TRIGGER_USD:
+                    await asyncio.sleep(0.5)
                     continue
+                log.info("GAP TRIGGER! gap=$%.2f > $%.2f threshold at T-%.1fs", gap, config.GAP_TRIGGER_USD, seconds_to_close)
+                
+                # Fetch exact prices for execution
+                prices = _get_token_prices(client, window.up_token_id, window.down_token_id)
+                up_odds = prices["up"]
+                down_odds = prices["down"]
+                state["up_odds"] = up_odds
+                state["down_odds"] = down_odds
 
-        # ── PRIMARY ENTRY: T-5s ──────────────────────────────────
-        if 0 < seconds_to_close <= config.ENTRY_SECONDS_BEFORE_CLOSE + 0.1:
+        elif is_primary:
             # Precision wait until exactly T-5s
             target_time = window.end_date.timestamp() - config.ENTRY_SECONDS_BEFORE_CLOSE
             now_perf = time.time()
-
             if now_perf < target_time:
-                # Use perf_counter for precision sleep
                 wait = target_time - now_perf
                 if wait > 0:
                     ref = time.perf_counter()
                     while (time.perf_counter() - ref) < wait:
-                        await asyncio.sleep(0.001)  # 1ms granularity
-
+                        await asyncio.sleep(0.001)
+            
             log.info("PRIMARY ENTRY at T-%.3fs", seconds_to_close)
 
-            # Fetch prices
+            # Fetch exact prices for execution
             prices = _get_token_prices(client, window.up_token_id, window.down_token_id)
-            state["up_odds"] = prices["up"]
-            state["down_odds"] = prices["down"]
+            up_odds = prices["up"]
+            down_odds = prices["down"]
+            state["up_odds"] = up_odds
+            state["down_odds"] = down_odds
 
-            # Pick the token with the highest price (closest to 1.00)
-            if prices["up"] >= prices["down"]:
-                token_id = window.up_token_id
-                token_label = "UP"
+        # Get balance for Kelly sizing
+        equity = get_total_equity(client, positions)
+        total_balance = equity["total"]
+
+        # Run quantitative model
+        signal = evaluate_market(
+            btc_price=btc_price,
+            price_to_beat=window.price_to_beat,
+            seconds_remaining=seconds_to_close,
+            up_odds=up_odds,
+            down_odds=down_odds,
+            balance=total_balance,
+            sigma_per_sec=config.BTC_VOLATILITY_PER_SEC,
+            edge_threshold=config.EDGE_THRESHOLD,
+            kelly_fraction=config.KELLY_FRACTION
+        )
+        
+        if signal:
+            # Update state for dashboard
+            state["p_true"] = signal.p_true
+            state["edge"] = signal.edge
+            state["ev"] = signal.ev
+            state["kelly_size"] = signal.kelly_size
+            state["signal_side"] = signal.side
+            state["signal_reason"] = signal.reason
+
+            if signal.should_trade:
+                token_id = window.up_token_id if signal.side == "UP" else window.down_token_id
+                
+                log.info(
+                    "TRADE SIGNAL: BUY %s @ %.4f | Edge: %.2f%% | EV: %.3f | Kelly Size: $%.2f",
+                    signal.side, signal.price, signal.edge * 100, signal.ev, signal.kelly_size
+                )
+                
+                await _execute_fok_order(client, token_id, signal.side, signal.kelly_size, state)
+                state["window_locked"] = True
+                log.info("Window locked — no further trades this window")
             else:
-                token_id = window.down_token_id
-                token_label = "DOWN"
-
-            trade_size = _calculate_trade_size(client, state.get("positions", []))
-            await _execute_fok_order(client, token_id, token_label, trade_size, state)
-
-            # Lock this window
+                log.info("SIGNAL SKIP: %s", signal.reason)
+                state["window_locked"] = True
+                log.info("Window locked — skipped trade")
+        else:
+            log.warning("Not enough data for strategy eval — skipping")
             state["window_locked"] = True
-            log.info("Window locked — waiting for next window")
-            continue
-
-        # Window close passed — wait for next discovery cycle
-        if seconds_to_close <= 0:
-            await asyncio.sleep(1)
-            continue
+            
+        await asyncio.sleep(0.5)
 
         # Not yet in trade zone — sleep briefly
         await asyncio.sleep(0.1)

@@ -199,9 +199,11 @@ async def _resolve_window_outcome(slug: str) -> Optional[str]:
 
 async def sim_trade_loop(portfolio: SimPortfolio, state: dict) -> None:
     """
-    Simulation trade loop — mirrors the real trader logic but uses virtual balance.
+    Simulation trade loop — uses Edge-EV-Kelly strategy with virtual balance.
     After each trade, waits for window resolution to determine win/loss.
     """
+    from src.strategy import evaluate_market
+    
     while True:
         window = state.get("window")
         if not window:
@@ -215,111 +217,98 @@ async def sim_trade_loop(portfolio: SimPortfolio, state: dict) -> None:
 
         now = datetime.now(timezone.utc)
         seconds_to_close = (window.end_date - now).total_seconds()
-
-        # Update state for dashboard
         state["seconds_to_close"] = seconds_to_close
-
-        # Update equity from sim portfolio
         state["equity"] = portfolio.get_equity_dict()
         state["positions"] = portfolio.get_positions_list()
 
-        # ── SECONDARY ENTRY: gap trigger (T-60s to T-5s) ────────
-        if config.GAP_TRIGGER_SECONDS_BEFORE_CLOSE >= seconds_to_close > config.ENTRY_SECONDS_BEFORE_CLOSE:
-            btc_price = state.get("btc_price", 0)
+        # Check if we are within any trigger window
+        is_primary = (0 < seconds_to_close <= config.ENTRY_SECONDS_BEFORE_CLOSE + 0.1)
+        is_secondary = (config.GAP_TRIGGER_SECONDS_BEFORE_CLOSE >= seconds_to_close > config.ENTRY_SECONDS_BEFORE_CLOSE)
+        
+        if not (is_primary or is_secondary):
+            if seconds_to_close <= 0:
+                await asyncio.sleep(1)
+            else:
+                await asyncio.sleep(0.1)
+            continue
+
+        # Evaluate strategy
+        btc_price = state.get("btc_price", 0)
+        up_odds = state.get("up_odds", 0)
+        down_odds = state.get("down_odds", 0)
+        
+        if is_secondary:
             if btc_price > 0 and window.price_to_beat > 0:
                 gap = abs(btc_price - window.price_to_beat)
                 state["gap"] = gap
-
-                if gap > config.GAP_TRIGGER_USD:
-                    log.info(
-                        "SIM GAP TRIGGER! gap=$%.2f > $%.2f at T-%.1fs",
-                        gap, config.GAP_TRIGGER_USD, seconds_to_close,
-                    )
-
-                    up_odds = state.get("up_odds", 0)
-                    down_odds = state.get("down_odds", 0)
-
-                    if up_odds >= down_odds and up_odds > 0:
-                        side, price = "UP", up_odds
-                    elif down_odds > 0:
-                        side, price = "DOWN", down_odds
-                    else:
-                        await asyncio.sleep(0.5)
-                        continue
-
-                    trade_size = _sim_trade_size(portfolio)
-                    if trade_size < SIM_MIN_ORDER_SIZE:
-                        state["last_trade"] = f"SIM SKIP — balance too low (${portfolio.balance:.2f})"
-                        state["window_locked"] = True
-                        continue
-
-                    trade = portfolio.place_trade(side, price, trade_size, window.slug)
-                    log.info(
-                        "SIM TRADE: BUY %s @ %.4f | $%.2f | tokens=%.2f",
-                        side, price, trade_size, trade["tokens"],
-                    )
-                    state["last_trade"] = f"SIM BUY {side} @ {price:.4f} | ${trade_size:.2f}"
-                    state["equity"] = portfolio.get_equity_dict()
-                    state["positions"] = portfolio.get_positions_list()
-                    state["window_locked"] = True
-
-                    # Resolve asynchronously
-                    asyncio.create_task(_resolve_and_update(portfolio, state, window.slug))
+                if gap <= config.GAP_TRIGGER_USD:
+                    await asyncio.sleep(0.5)
                     continue
+                log.info("SIM GAP TRIGGER! gap=$%.2f > $%.2f at T-%.1fs", gap, config.GAP_TRIGGER_USD, seconds_to_close)
 
-        # ── PRIMARY ENTRY: T-5s ──────────────────────────────────
-        if 0 < seconds_to_close <= config.ENTRY_SECONDS_BEFORE_CLOSE + 0.1:
+        elif is_primary:
+            # Precise timing
             target_time = window.end_date.timestamp() - config.ENTRY_SECONDS_BEFORE_CLOSE
             now_perf = time.time()
-
             if now_perf < target_time:
                 wait = target_time - now_perf
                 if wait > 0:
                     ref = time.perf_counter()
                     while (time.perf_counter() - ref) < wait:
                         await asyncio.sleep(0.001)
-
             log.info("SIM PRIMARY ENTRY at T-%.3fs", seconds_to_close)
 
-            up_odds = state.get("up_odds", 0)
-            down_odds = state.get("down_odds", 0)
+        # Run quantitative model 
+        signal = evaluate_market(
+            btc_price=btc_price,
+            price_to_beat=window.price_to_beat,
+            seconds_remaining=seconds_to_close,
+            up_odds=up_odds,
+            down_odds=down_odds,
+            balance=portfolio.balance,
+            sigma_per_sec=config.BTC_VOLATILITY_PER_SEC,
+            edge_threshold=config.EDGE_THRESHOLD,
+            kelly_fraction=config.KELLY_FRACTION
+        )
+        
+        if signal:
+            # Update state for dashboard
+            state["p_true"] = signal.p_true
+            state["edge"] = signal.edge
+            state["ev"] = signal.ev
+            state["kelly_size"] = signal.kelly_size
+            state["signal_side"] = signal.side
+            state["signal_reason"] = signal.reason
 
-            if up_odds >= down_odds and up_odds > 0:
-                side, price = "UP", up_odds
-            elif down_odds > 0:
-                side, price = "DOWN", down_odds
+            if signal.should_trade:
+                trade_size = signal.kelly_size
+                if trade_size < SIM_MIN_ORDER_SIZE:
+                    state["last_trade"] = f"SIM SKIP — bet size ${trade_size:.2f} too low"
+                    state["window_locked"] = True
+                    continue
+
+                trade = portfolio.place_trade(signal.side, signal.price, trade_size, window.slug)
+                log.info(
+                    "SIM TRADE: BUY %s @ %.4f | $%.2f | edge=%.2f%% ev=%.3f",
+                    signal.side, signal.price, trade_size, signal.edge*100, signal.ev
+                )
+                state["last_trade"] = f"SIM BUY {signal.side} @ {signal.price:.4f} | ${trade_size:.2f}"
+                state["equity"] = portfolio.get_equity_dict()
+                state["positions"] = portfolio.get_positions_list()
+                state["window_locked"] = True
+
+                # Resolve asynchronously
+                asyncio.create_task(_resolve_and_update(portfolio, state, window.slug))
             else:
-                log.warning("SIM: No odds available — skipping")
-                state["last_trade"] = "SIM SKIP — no odds available"
+                log.info("SIM SKIP: %s", signal.reason)
+                state["last_trade"] = f"SIM SKIP — {signal.reason}"
                 state["window_locked"] = True
-                continue
-
-            trade_size = _sim_trade_size(portfolio)
-            if trade_size < SIM_MIN_ORDER_SIZE:
-                state["last_trade"] = f"SIM SKIP — balance too low (${portfolio.balance:.2f})"
-                state["window_locked"] = True
-                continue
-
-            trade = portfolio.place_trade(side, price, trade_size, window.slug)
-            log.info(
-                "SIM TRADE: BUY %s @ %.4f | $%.2f | tokens=%.2f",
-                side, price, trade_size, trade["tokens"],
-            )
-            state["last_trade"] = f"SIM BUY {side} @ {price:.4f} | ${trade_size:.2f}"
-            state["equity"] = portfolio.get_equity_dict()
-            state["positions"] = portfolio.get_positions_list()
+        else:
+            log.warning("SIM: Not enough data for strategy eval")
+            state["last_trade"] = "SIM SKIP — missing data"
             state["window_locked"] = True
-
-            # Resolve asynchronously
-            asyncio.create_task(_resolve_and_update(portfolio, state, window.slug))
-            continue
-
-        # Window close passed
-        if seconds_to_close <= 0:
-            await asyncio.sleep(1)
-            continue
-
-        await asyncio.sleep(0.1)
+            
+        await asyncio.sleep(0.5)
 
 
 def _sim_trade_size(portfolio: SimPortfolio) -> float:
