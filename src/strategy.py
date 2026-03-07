@@ -110,7 +110,7 @@ def evaluate_market(
     edge_threshold: float,
     kelly_fraction: float,
     entry_seconds: float = 3.0,
-    gap_trigger: float = 70.0
+    gap_trigger_percent: float = 0.0006
 ) -> Optional[TradeSignal]:
     """
     Evaluate the market to generate a trade signal.
@@ -154,8 +154,8 @@ def evaluate_market(
     
     if seconds_remaining > entry_seconds:
         reason = f"Wait: {seconds_remaining:.1f}s > {entry_seconds}s"
-    elif abs(gap) < gap_trigger:
-        reason = f"Wait: Gap ${abs(gap):.2f} < ${gap_trigger:.2f}"
+    elif abs(gap) / price_to_beat < gap_trigger_percent:
+        reason = f"Wait: Gap {abs(gap)/price_to_beat*100:.3f}% < {gap_trigger_percent*100:.3f}%"
     elif edge < edge_threshold:
         reason = f"Edge {edge:.4f} < {edge_threshold}"
     elif ev <= 0:

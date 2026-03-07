@@ -259,7 +259,7 @@ async def trade_loop(client: ClobClient, state: dict) -> None:
             edge_threshold=config.EDGE_THRESHOLD,
             kelly_fraction=config.KELLY_FRACTION,
             entry_seconds=config.ENTRY_SECONDS_BEFORE_CLOSE,
-            gap_trigger=config.GAP_TRIGGER_USD
+            gap_trigger_percent=config.GAP_TRIGGER_PERCENT
         )
         
         # If window changed, reset state
@@ -310,7 +310,7 @@ async def trade_loop(client: ClobClient, state: dict) -> None:
                     edge_threshold=config.EDGE_THRESHOLD,
                     kelly_fraction=config.KELLY_FRACTION,
                     entry_seconds=config.ENTRY_SECONDS_BEFORE_CLOSE,
-                    gap_trigger=config.GAP_TRIGGER_USD
+                    gap_trigger_percent=config.GAP_TRIGGER_PERCENT
                 )
                 
                 if not exact_signal.should_trade:
