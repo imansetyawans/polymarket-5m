@@ -127,14 +127,14 @@ async def trade_loop(client: ClobClient, state: dict) -> None:
             await asyncio.sleep(0.5)
             continue
 
+        now = datetime.now(timezone.utc)
+        seconds_to_close = (window.end_date - now).total_seconds()
+        state["seconds_to_close"] = seconds_to_close
+
         # Already traded this window?
         if state.get("window_locked", False):
             await asyncio.sleep(0.5)
             continue
-
-        now = datetime.now(timezone.utc)
-        seconds_to_close = (window.end_date - now).total_seconds()
-        state["seconds_to_close"] = seconds_to_close
 
         btc_price = state.get("btc_price", 0)
         up_odds = state.get("up_odds", 0)

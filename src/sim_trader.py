@@ -211,16 +211,17 @@ async def sim_trade_loop(portfolio: SimPortfolio, state: dict) -> None:
             await asyncio.sleep(0.5)
             continue
 
+        now = datetime.now(timezone.utc)
+        seconds_to_close = (window.end_date - now).total_seconds()
+        state["seconds_to_close"] = seconds_to_close
+
+        state["equity"] = portfolio.get_equity_dict()
+        state["positions"] = portfolio.get_positions_list()
+
         # Already traded this window?
         if state.get("window_locked", False):
             await asyncio.sleep(0.5)
             continue
-
-        now = datetime.now(timezone.utc)
-        seconds_to_close = (window.end_date - now).total_seconds()
-        state["seconds_to_close"] = seconds_to_close
-        state["equity"] = portfolio.get_equity_dict()
-        state["positions"] = portfolio.get_positions_list()
 
         # Evaluate strategy continuously using current cached state
         btc_price = state.get("btc_price", 0)
