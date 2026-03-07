@@ -48,7 +48,7 @@ def _get_token_prices(client: ClobClient, up_token: str, down_token: str) -> dic
 
 
 
-async def _execute_fok_order(
+async def _execute_market_order(
     client: ClobClient,
     token_id: str,
     token_label: str,
@@ -56,7 +56,7 @@ async def _execute_fok_order(
     state: dict,
 ) -> bool:
     """
-    Execute a Fill-or-Kill market order.
+    Execute a Fill-and-Kill (FAK) market order.
     Returns True if order was placed (regardless of fill), False on error.
     """
     if trade_size < MIN_ORDER_SIZE:
@@ -69,11 +69,11 @@ async def _execute_fok_order(
 
     try:
         log.info(
-            "Placing FOK BUY %s | size=$%.2f | token=%s...",
+            "Placing FAK BUY %s | size=$%.2f | token=%s...",
             token_label, trade_size, token_id[:16],
         )
 
-        # Create FOK market order — amount is in USDC
+        # Create market order — amount is in USDC
         order_args = MarketOrderArgs(
             token_id=token_id,
             amount=trade_size,
@@ -81,7 +81,7 @@ async def _execute_fok_order(
         )
 
         signed = client.create_market_order(order_args)
-        resp = client.post_order(signed, orderType=OrderType.FOK)
+        resp = client.post_order(signed, orderType=OrderType.FAK)
 
         # Parse response
         if isinstance(resp, dict):
@@ -92,13 +92,13 @@ async def _execute_fok_order(
             order_id = ""
 
         log.info(
-            "FOK order result: status=%s | order=%s",
+            "FAK order result: status=%s | order=%s",
             status, order_id[:16] if order_id else "N/A",
         )
 
         if "reject" in str(status).lower() or "fail" in str(status).lower():
             reason = resp.get("message", "") if isinstance(resp, dict) else str(resp)
-            log.warning("FOK REJECTED: %s — skipping window (no retry)", reason)
+            log.warning("FAK REJECTED: %s — skipping window (no retry)", reason)
             state["last_trade"] = f"REJECTED — {reason}"
         else:
             state["last_trade"] = f"BUY {token_label} ${trade_size:.2f} | {status}"
@@ -211,7 +211,7 @@ async def trade_loop(client: ClobClient, state: dict) -> None:
                     exact_signal.side, exact_signal.price, exact_signal.edge * 100, exact_signal.ev, exact_signal.kelly_size
                 )
                 
-                await _execute_fok_order(client, token_id, exact_signal.side, exact_signal.kelly_size, state)
+                await _execute_market_order(client, token_id, exact_signal.side, exact_signal.kelly_size, state)
                 state["window_locked"] = True
                 log.info("Window locked — no further trades this window")
             else:
