@@ -25,6 +25,8 @@ BINANCE_BTC_URL: str = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUS
 EDGE_THRESHOLD: float = float(os.getenv("EDGE_THRESHOLD", "0.07"))
 KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.5"))
 BTC_VOLATILITY_PER_SEC: float = float(os.getenv("BTC_VOLATILITY_PER_SEC", "2.50"))
+ENTRY_SECONDS_BEFORE_CLOSE: float = float(os.getenv("ENTRY_SECONDS_BEFORE_CLOSE", "3.0"))
+GAP_TRIGGER_USD: float = float(os.getenv("GAP_TRIGGER_USD", "70.0"))
 
 # ── Contract Addresses (Polygon) ────────────────────────────────
 USDC_ADDRESS: str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
@@ -34,9 +36,9 @@ NEG_RISK_EXCHANGE_ADDRESS: str = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
 NEG_RISK_ADAPTER_ADDRESS: str = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
 
 # ── Timing ───────────────────────────────────────────────────────
-DASHBOARD_REFRESH_PER_SECOND: int = 2  # 500ms
-POSITION_POLL_INTERVAL: int = 5  # seconds
-MARKET_RETRY_INTERVAL: int = 5  # seconds when idle
+DASHBOARD_REFRESH_PER_SECOND: int = 1  # 500ms
+POSITION_POLL_INTERVAL: int = 1  # seconds
+MARKET_RETRY_INTERVAL: int = 1  # seconds when idle
 PRICE_FEED_INTERVAL: float = 1.0  # seconds
 
 
