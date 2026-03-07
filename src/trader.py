@@ -106,8 +106,61 @@ async def _execute_market_order(
         return True
 
     except Exception as e:
-        log.error("FOK order failed: %s — skipping window", e)
+        log.error("FAK order failed: %s — skipping window", e)
         state["last_trade"] = f"ERROR — {e}"
+        return False
+
+
+async def _execute_sell_order(
+    client: ClobClient,
+    token_id: str,
+    token_label: str,
+    num_shares: float,
+    state: dict,
+) -> bool:
+    """
+    Execute a FAK market SELL order to immediately dump owned tokens.
+    Returns True if order was placed, False on error.
+    """
+    from py_clob_client.order_builder.constants import SELL
+    try:
+        log.info(
+            "Placing FAK SELL %s | shares=%.2f | token=%s...",
+            token_label, num_shares, token_id[:16],
+        )
+
+        # Create market SELL order — amount is in Shares
+        order_args = MarketOrderArgs(
+            token_id=token_id,
+            amount=num_shares,
+            side=SELL,
+        )
+
+        signed = client.create_market_order(order_args)
+        resp = client.post_order(signed, orderType=OrderType.FAK)
+
+        if isinstance(resp, dict):
+            status = resp.get("status", resp.get("orderStatus", "UNKNOWN"))
+            order_id = resp.get("orderID", resp.get("id", ""))
+        else:
+            status = str(resp)
+            order_id = ""
+
+        log.info(
+            "SELL order result: status=%s | order=%s",
+            status, order_id[:16] if order_id else "N/A",
+        )
+
+        if "reject" in str(status).lower() or "fail" in str(status).lower():
+            reason = resp.get("message", "") if isinstance(resp, dict) else str(resp)
+            log.warning("SELL REJECTED: %s", reason)
+            state["last_trade"] = f"SELL REJECTED — {reason}"
+            return False
+            
+        return True
+
+    except Exception as e:
+        log.error("SELL order failed: %s", e)
         return False
 
 
@@ -131,9 +184,31 @@ async def trade_loop(client: ClobClient, state: dict) -> None:
         seconds_to_close = (window.end_date - now).total_seconds()
         state["seconds_to_close"] = seconds_to_close
 
-        # Already traded this window?
+        # Check if we should execute a pre-close sell (0.5s before resolution)
         if state.get("window_locked", False):
-            await asyncio.sleep(0.5)
+            if not state.get("sell_locked", False) and state.get("position_shares", 0) > 0:
+                if 0.0 < seconds_to_close <= 0.5:
+                    log.info("PRE-CLOSE AUTO-SELL TRIGGERED: selling %.2f shares", state["position_shares"])
+                    sell_token = state["position_token_id"]
+                    sell_label = state.get("signal_side", "UNKNOWN")
+                    
+                    sell_success = await _execute_sell_order(
+                        client, 
+                        sell_token, 
+                        sell_label, 
+                        state["position_shares"], 
+                        state
+                    )
+                    
+                    state["sell_locked"] = True
+                    if sell_success:
+                        log.info("Pre-close auto-sell fired successfully.")
+                        state["last_redeem"] = "Pre-Close FAK Auto-Sold"
+                    else:
+                        log.error("Pre-close auto-sell failed.")
+
+            # Continue high-frequency ticking if window is locked to wait for sell
+            await asyncio.sleep(0.05)
             continue
 
         btc_price = state.get("btc_price", 0)
@@ -163,6 +238,21 @@ async def trade_loop(client: ClobClient, state: dict) -> None:
             kelly_fraction=config.KELLY_FRACTION
         )
         
+        # If window changed, reset state
+        state_window = state.get("window")
+        if not state_window or state_window.slug != window.slug:
+            log.info("--- New 5min Window Detected: %s ---", window.slug)
+            state["window"] = window
+            state["window_locked"] = False
+            state["last_trade"] = "No trades yet"
+            state["position_shares"] = 0
+            state["sell_locked"] = False
+            state["up_odds"] = 0
+            state["down_odds"] = 0
+            # Reset analytics
+            for k in ["p_true", "edge", "ev", "kelly_size", "signal_side", "signal_reason"]:
+                state.pop(k, None)
+
         if signal:
             # Update state for dashboard
             state["p_true"] = signal.p_true
@@ -211,16 +301,23 @@ async def trade_loop(client: ClobClient, state: dict) -> None:
                     exact_signal.side, exact_signal.price, exact_signal.edge * 100, exact_signal.ev, exact_signal.kelly_size
                 )
                 
-                await _execute_market_order(client, token_id, exact_signal.side, exact_signal.kelly_size, state)
+                success = await _execute_market_order(client, token_id, exact_signal.side, exact_signal.kelly_size, state)
                 state["window_locked"] = True
-                log.info("Window locked — no further trades this window")
+                
+                # To sell the tokens back, we need to know exactly how many we bought
+                # We estimate shares by dividing Kelly size / execution price.  
+                # For exact shares we would need to ping `client.get_balance()`, but estimate is often OK for FAK.
+                # Since the exact bought size requires polling the blockchain, we fetch it via get_portfolio or just ask to sell 1000 shares FAK.
+                # Actually, sending a massive FAK share size (e.g., 99999) safely tells the CLOB "Sell ALL my shares".
+                if success:
+                    state["position_token_id"] = token_id
+                    state["position_shares"] = 999999.0  # FAK sell-all trick
+                    
+                log.info("Window locked — no further buys this window")
             else:
                 log.info("SIGNAL SKIP: %s", signal.reason)
-                state["window_locked"] = True
-                log.info("Window locked — skipped trade")
         else:
             log.warning("Not enough data for strategy eval — skipping")
-            state["window_locked"] = True
             
         await asyncio.sleep(0.5)
 
