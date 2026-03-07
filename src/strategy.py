@@ -85,6 +85,10 @@ def kelly_size(p_true: float, market_price: float, balance: float, fraction: flo
     if f_star <= 0:
         return 0.0
         
+    # Scale by desired fraction (e.g. 0.5 for half-Kelly)
+    # Cap at 100% of balance
+    bet_fraction = min(f_star * fraction, 1.0)
+
     # Capping size
     raw_size = balance * bet_fraction
     
