@@ -200,12 +200,49 @@ def _make_equity_panel(state: dict) -> Panel:
 
 
 def _make_positions_panel(state: dict) -> Panel:
-    """Open positions table."""
+    """Open positions table with real-time Running PnL."""
     positions = state.get("positions", [])
+    window = state.get("window")
+    
+    # Calculate Running PnL for newest active trade
+    pnl_text = ""
+    if positions and window:
+        latest = positions[0]
+        side = str(latest.get("side", "")).upper()
+        
+        # Extract cost basis depending on API vs SIM dictionary structure
+        if "size" in latest and "price" in latest:
+            # LIVE API format (size = shares, price = entry price)
+            shares = float(latest["size"])
+            entry_price = float(latest["price"])
+            cost = shares * entry_price
+        elif "size_usdc" in latest and "tokens" in latest:
+            # SIM format
+            shares = float(latest["tokens"])
+            cost = float(latest["size_usdc"])
+        else:
+            shares = cost = 0
+
+        # Calculate live value if we have valid shares
+        if shares > 0 and side in ("BUY UP", "BUY DOWN", "BUY", "SELL"):
+            # Simplify side to "UP" or "DOWN"
+            target_side = "UP" if "UP" in side or (side == "BUY" and latest.get("outcome", "").upper() == "UP") else "DOWN"
+            
+            live_odds = state.get("up_odds", 0) if target_side == "UP" else state.get("down_odds", 0)
+            
+            if live_odds > 0:
+                current_value = shares * live_odds
+                pnl = current_value - cost
+                
+                pnl_color = "bright_green" if pnl > 0 else "bright_red"
+                sign = "+" if pnl > 0 else ""
+                pnl_text = f"  |  [bold]Live PnL:[/] [{pnl_color}]{sign}${pnl:.2f}[/]"
+
+    title = f"[bold]📋 Positions[/]{pnl_text}"
 
     if not positions:
         content = Text("  No open positions", style=DIM)
-        return Panel(content, title="[bold]📋 Positions[/]", border_style=BORDER, height=6)
+        return Panel(content, title=title, border_style=BORDER, height=6)
 
     table = Table(expand=True, padding=(0, 1))
     table.add_column("Market", style=ACCENT, max_width=20)
@@ -223,7 +260,7 @@ def _make_positions_panel(state: dict) -> Panel:
         side_color = UP_COLOR if "buy" in side.lower() else DOWN_COLOR
         table.add_row(market, f"[{side_color}]{side}[/]", size_str, status)
 
-    return Panel(table, title="[bold]📋 Positions[/]", border_style=BORDER)
+    return Panel(table, title=title, border_style=BORDER)
 
 
 def _make_trade_log_panel(state: dict) -> Panel:
