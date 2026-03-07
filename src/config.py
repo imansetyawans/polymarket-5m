@@ -22,8 +22,6 @@ GAMMA_API_HOST: str = "https://gamma-api.polymarket.com"
 BINANCE_BTC_URL: str = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
 
 # ── Trade Settings ───────────────────────────────────────────────
-TRADE_AMOUNT_MODE: str = os.getenv("TRADE_AMOUNT_MODE", "percent").lower()
-TRADE_AMOUNT_VALUE: float = float(os.getenv("TRADE_AMOUNT_VALUE", "50"))
 GAP_TRIGGER_USD: float = float(os.getenv("GAP_TRIGGER_USD", "120"))
 ENTRY_SECONDS_BEFORE_CLOSE: float = float(os.getenv("ENTRY_SECONDS_BEFORE_CLOSE", "5"))
 GAP_TRIGGER_SECONDS_BEFORE_CLOSE: float = float(os.getenv("GAP_TRIGGER_SECONDS_BEFORE_CLOSE", "60"))

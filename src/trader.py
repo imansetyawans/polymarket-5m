@@ -45,16 +45,7 @@ def _get_token_prices(client: ClobClient, up_token: str, down_token: str) -> dic
         return {"up": 0, "down": 0}
 
 
-def _calculate_trade_size(client: ClobClient, positions: list) -> float:
-    """Calculate trade size based on config mode (percent or fixed)."""
-    if config.TRADE_AMOUNT_MODE == "fixed":
-        return config.TRADE_AMOUNT_VALUE
 
-    # Percent mode
-    equity = get_total_equity(client, positions)
-    total = equity["total"]
-    size = (config.TRADE_AMOUNT_VALUE / 100.0) * total
-    return round(size, 2)
 
 
 async def _execute_fok_order(

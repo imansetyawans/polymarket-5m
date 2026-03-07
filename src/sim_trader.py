@@ -312,15 +312,6 @@ async def sim_trade_loop(portfolio: SimPortfolio, state: dict) -> None:
         await asyncio.sleep(0.5)
 
 
-def _sim_trade_size(portfolio: SimPortfolio) -> float:
-    """Calculate sim trade size using config settings."""
-    if config.TRADE_AMOUNT_MODE == "fixed":
-        return min(config.TRADE_AMOUNT_VALUE, portfolio.balance)
-
-    size = (config.TRADE_AMOUNT_VALUE / 100.0) * portfolio.balance
-    return round(min(size, portfolio.balance), 2)
-
-
 async def _resolve_and_update(portfolio: SimPortfolio, state: dict, slug: str) -> None:
     """Wait for window resolution, then update portfolio and state."""
     log.info("SIM: Waiting for %s to resolve...", slug)
