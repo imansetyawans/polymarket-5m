@@ -21,11 +21,6 @@ CLOB_HOST: str = "https://clob.polymarket.com"
 GAMMA_API_HOST: str = "https://gamma-api.polymarket.com"
 BINANCE_BTC_URL: str = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
 
-# ── Trade Settings ───────────────────────────────────────────────
-GAP_TRIGGER_USD: float = float(os.getenv("GAP_TRIGGER_USD", "120"))
-ENTRY_SECONDS_BEFORE_CLOSE: float = float(os.getenv("ENTRY_SECONDS_BEFORE_CLOSE", "5"))
-GAP_TRIGGER_SECONDS_BEFORE_CLOSE: float = float(os.getenv("GAP_TRIGGER_SECONDS_BEFORE_CLOSE", "60"))
-
 # ── Quantitative Strategy Settings ───────────────────────────────
 EDGE_THRESHOLD: float = float(os.getenv("EDGE_THRESHOLD", "0.07"))
 KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.5"))

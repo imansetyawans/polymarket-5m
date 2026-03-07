@@ -222,42 +222,15 @@ async def sim_trade_loop(portfolio: SimPortfolio, state: dict) -> None:
         state["equity"] = portfolio.get_equity_dict()
         state["positions"] = portfolio.get_positions_list()
 
-        # Check if we are within any trigger window
-        is_primary = (0 < seconds_to_close <= config.ENTRY_SECONDS_BEFORE_CLOSE + 0.1)
-        is_secondary = (config.GAP_TRIGGER_SECONDS_BEFORE_CLOSE >= seconds_to_close > config.ENTRY_SECONDS_BEFORE_CLOSE)
-        
-        if not (is_primary or is_secondary):
-            if seconds_to_close <= 0:
-                await asyncio.sleep(1)
-            else:
-                await asyncio.sleep(0.1)
-            continue
-
-        # Evaluate strategy
+        # Evaluate strategy continuously using current cached state
         btc_price = state.get("btc_price", 0)
         up_odds = state.get("up_odds", 0)
         down_odds = state.get("down_odds", 0)
         
-        if is_secondary:
-            if btc_price > 0 and window.price_to_beat > 0:
-                gap = abs(btc_price - window.price_to_beat)
-                state["gap"] = gap
-                if gap <= config.GAP_TRIGGER_USD:
-                    await asyncio.sleep(0.5)
-                    continue
-                log.info("SIM GAP TRIGGER! gap=$%.2f > $%.2f at T-%.1fs", gap, config.GAP_TRIGGER_USD, seconds_to_close)
-
-        elif is_primary:
-            # Precise timing
-            target_time = window.end_date.timestamp() - config.ENTRY_SECONDS_BEFORE_CLOSE
-            now_perf = time.time()
-            if now_perf < target_time:
-                wait = target_time - now_perf
-                if wait > 0:
-                    ref = time.perf_counter()
-                    while (time.perf_counter() - ref) < wait:
-                        await asyncio.sleep(0.001)
-            log.info("SIM PRIMARY ENTRY at T-%.3fs", seconds_to_close)
+        # Give the state dictionary time to populate missing data
+        if btc_price <= 0 or window.price_to_beat <= 0 or up_odds <= 0 or down_odds <= 0:
+            await asyncio.sleep(0.5)
+            continue
 
         # Run quantitative model 
         signal = evaluate_market(

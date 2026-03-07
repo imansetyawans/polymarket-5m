@@ -136,58 +136,15 @@ async def trade_loop(client: ClobClient, state: dict) -> None:
         seconds_to_close = (window.end_date - now).total_seconds()
         state["seconds_to_close"] = seconds_to_close
 
-        # Check if we are within any trigger window
-        is_primary = (0 < seconds_to_close <= config.ENTRY_SECONDS_BEFORE_CLOSE + 0.1)
-        is_secondary = (config.GAP_TRIGGER_SECONDS_BEFORE_CLOSE >= seconds_to_close > config.ENTRY_SECONDS_BEFORE_CLOSE)
-        
-        if not (is_primary or is_secondary):
-            if seconds_to_close <= 0:
-                await asyncio.sleep(1)
-            else:
-                await asyncio.sleep(0.1)
-            continue
-
-        # Evaluate strategy
         btc_price = state.get("btc_price", 0)
         up_odds = state.get("up_odds", 0)
         down_odds = state.get("down_odds", 0)
         positions = state.get("positions", [])
-        
-        if is_secondary:
-            if btc_price > 0 and window.price_to_beat > 0:
-                gap = abs(btc_price - window.price_to_beat)
-                state["gap"] = gap
-                if gap <= config.GAP_TRIGGER_USD:
-                    await asyncio.sleep(0.5)
-                    continue
-                log.info("GAP TRIGGER! gap=$%.2f > $%.2f threshold at T-%.1fs", gap, config.GAP_TRIGGER_USD, seconds_to_close)
-                
-                # Fetch exact prices for execution
-                prices = _get_token_prices(client, window.up_token_id, window.down_token_id)
-                up_odds = prices["up"]
-                down_odds = prices["down"]
-                state["up_odds"] = up_odds
-                state["down_odds"] = down_odds
 
-        elif is_primary:
-            # Precision wait until exactly T-5s
-            target_time = window.end_date.timestamp() - config.ENTRY_SECONDS_BEFORE_CLOSE
-            now_perf = time.time()
-            if now_perf < target_time:
-                wait = target_time - now_perf
-                if wait > 0:
-                    ref = time.perf_counter()
-                    while (time.perf_counter() - ref) < wait:
-                        await asyncio.sleep(0.001)
-            
-            log.info("PRIMARY ENTRY at T-%.3fs", seconds_to_close)
-
-            # Fetch exact prices for execution
-            prices = _get_token_prices(client, window.up_token_id, window.down_token_id)
-            up_odds = prices["up"]
-            down_odds = prices["down"]
-            state["up_odds"] = up_odds
-            state["down_odds"] = down_odds
+        # Avoid evaluating before prices and odds are populated
+        if btc_price <= 0 or window.price_to_beat <= 0 or up_odds <= 0 or down_odds <= 0:
+            await asyncio.sleep(0.5)
+            continue
 
         # Get balance for Kelly sizing
         equity = get_total_equity(client, positions)
@@ -216,14 +173,45 @@ async def trade_loop(client: ClobClient, state: dict) -> None:
             state["signal_reason"] = signal.reason
 
             if signal.should_trade:
-                token_id = window.up_token_id if signal.side == "UP" else window.down_token_id
+                # ── LIVE TRADING: Fetch exact orderbook prices right before execution
+                # The continuous loop uses the 1-second cached background odds.
+                # Once the math says YES, we must verify with the live API to prevent slippage.
+                prices = _get_token_prices(client, window.up_token_id, window.down_token_id)
+                exact_up_odds = prices["up"]
+                exact_down_odds = prices["down"]
+                
+                # Update state
+                state["up_odds"] = exact_up_odds
+                state["down_odds"] = exact_down_odds
+
+                # Re-evaluate the math with the exact, lowest-latency prices
+                exact_signal = evaluate_market(
+                    btc_price=btc_price,
+                    price_to_beat=window.price_to_beat,
+                    seconds_remaining=seconds_to_close,
+                    up_odds=exact_up_odds,
+                    down_odds=exact_down_odds,
+                    balance=total_balance,
+                    sigma_per_sec=config.BTC_VOLATILITY_PER_SEC,
+                    edge_threshold=config.EDGE_THRESHOLD,
+                    kelly_fraction=config.KELLY_FRACTION
+                )
+                
+                if not exact_signal.should_trade:
+                    log.warning("Trade aborted: Exact live prices erased the mathematical edge.")
+                    state["last_trade"] = "ABORTED — Edge lost on live price check"
+                    await asyncio.sleep(0.5)
+                    continue
+                
+                # Proceed with exact signal
+                token_id = window.up_token_id if exact_signal.side == "UP" else window.down_token_id
                 
                 log.info(
                     "TRADE SIGNAL: BUY %s @ %.4f | Edge: %.2f%% | EV: %.3f | Kelly Size: $%.2f",
-                    signal.side, signal.price, signal.edge * 100, signal.ev, signal.kelly_size
+                    exact_signal.side, exact_signal.price, exact_signal.edge * 100, exact_signal.ev, exact_signal.kelly_size
                 )
                 
-                await _execute_fok_order(client, token_id, signal.side, signal.kelly_size, state)
+                await _execute_fok_order(client, token_id, exact_signal.side, exact_signal.kelly_size, state)
                 state["window_locked"] = True
                 log.info("Window locked — no further trades this window")
             else:
