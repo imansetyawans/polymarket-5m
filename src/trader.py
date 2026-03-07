@@ -78,6 +78,7 @@ async def _execute_market_order(
             token_id=token_id,
             amount=trade_size,
             side=BUY,
+            order_type=OrderType.FAK
         )
 
         signed = client.create_market_order(order_args)
@@ -123,17 +124,38 @@ async def _execute_sell_order(
     Returns True if order was placed, False on error.
     """
     from py_clob_client.order_builder.constants import SELL
+    from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
     try:
+        # 1. Fetch exact token balance to avoid Builder orderbook failure
+        exact_shares = num_shares
+        try:
+            resp = client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+            )
+            # Response is typically a list or dict
+            if isinstance(resp, list) and len(resp) > 0:
+                exact_shares = float(resp[0].get("balance", "0"))
+            elif isinstance(resp, dict):
+                exact_shares = float(resp.get("balance", "0"))
+        except Exception as e:
+            log.warning("Could not fetch exact token balance: %s. Using estimate.", e)
+
+        if exact_shares <= 0:
+            log.warning("Pre-Close Auto-Sell aborted: We do not own any shares of %s", token_id[:16])
+            state["last_redeem"] = "Pre-Close FAK Blocked: Zero Balance"
+            return False
+
         log.info(
-            "Placing FAK SELL %s | shares=%.2f | token=%s...",
-            token_label, num_shares, token_id[:16],
+            "Placing FAK SELL %s | exact_shares=%.2f | token=%s...",
+            token_label, exact_shares, token_id[:16],
         )
 
         # Create market SELL order — amount is in Shares
         order_args = MarketOrderArgs(
             token_id=token_id,
-            amount=num_shares,
+            amount=exact_shares,
             side=SELL,
+            order_type=OrderType.FAK
         )
 
         signed = client.create_market_order(order_args)
