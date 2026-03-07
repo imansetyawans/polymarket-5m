@@ -21,9 +21,17 @@ def create_client() -> ClobClient:
         funder=config.POLY_FUNDER_ADDRESS,
     )
 
-    # Derive or create L2 API credentials
+    # Derive or create L1 API credentials (required for balance/trading)
     creds = client.create_or_derive_api_creds()
     client.set_api_creds(creds)
+    
+    # Critical: The py-clob-client requires these explicit fields initialized 
+    # to pass the auth headers for restricted endpoints like `get_balance_allowance`
+    client.creds = creds
+    client.api_key = creds.api_key
+    client.api_secret = creds.api_secret
+    client.api_passphrase = creds.api_passphrase
+
     log.info("API credentials set — ready to trade")
 
     return client
