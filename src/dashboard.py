@@ -117,21 +117,10 @@ def _make_price_panel(state: dict) -> Panel:
         direction = "▲" if gap > 0 else "▼" if gap < 0 else "─"
         gap_color = UP_COLOR if gap > 0 else DOWN_COLOR if gap < 0 else DIM
         table.add_row("Gap", f"[{gap_color}]{direction} ${gap_abs:,.2f}[/]")
-
-        trigger = config_gap_trigger()
-        if gap_abs > trigger:
-            table.add_row("Gap Status", f"[bold bright_red blink]⚠ TRIGGER (>${trigger})[/]")
-        else:
-            table.add_row("Gap Status", f"[dim]Normal (need >${trigger})[/]")
     else:
         table.add_row("Gap", "[dim]—[/]")
 
     return Panel(table, title="[bold]₿ BTC Price (Binance)[/]", border_style=BORDER, height=7)
-
-
-def config_gap_trigger() -> float:
-    from src import config
-    return config.GAP_TRIGGER_USD
 
 
 def _make_odds_panel(state: dict) -> Panel:
