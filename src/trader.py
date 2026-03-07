@@ -81,7 +81,7 @@ async def _execute_fok_order(
         )
 
         signed = client.create_market_order(order_args)
-        resp = client.post_order(signed, order_type=OrderType.FOK)
+        resp = client.post_order(signed, orderType=OrderType.FOK)
 
         # Parse response
         if isinstance(resp, dict):

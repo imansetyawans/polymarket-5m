@@ -70,6 +70,10 @@ async def redeem_positions(redeemable: List[dict]) -> int:
     if not redeemable:
         return 0
 
+    if config.SIGNATURE_TYPE == 2:
+        log.info("Proxy wallet detected. Skipping manual Web3 redeem (Polymarket auto-redeems proxy wins).")
+        return 0
+
     try:
         w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
         account = w3.eth.account.from_key(config.POLY_PRIVATE_KEY)
