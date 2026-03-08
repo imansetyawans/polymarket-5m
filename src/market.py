@@ -182,41 +182,6 @@ def _parse_event_to_window(event: dict) -> Optional[MarketWindow]:
         return None
 
 
-async def _fetch_previous_price_to_beat(
-    session: aiohttp.ClientSession, current_slug: str
-) -> float:
-    """
-    Get priceToBeat from the previous window's eventMetadata.
-    The Gamma API populates this field AFTER a window resolves (may take a few seconds).
-    This is the exact Chainlink BTC/USD price at the start of the current window,
-    matching what Polymarket displays as "Price to beat".
-    """
-    try:
-        # Extract timestamp from current slug and go back one window
-        parts = current_slug.rsplit("-", 1)
-        current_ts = int(parts[-1])
-        prev_ts = current_ts - WINDOW_DURATION
-        prev_slug = f"btc-updown-5m-{prev_ts}"
-
-        url = f"{config.GAMMA_API_HOST}/events"
-        async with session.get(url, params={"slug": prev_slug}) as resp:
-            if resp.status != 200:
-                return 0.0
-            events = await resp.json()
-
-        if not events:
-            return 0.0
-
-        meta = events[0].get("eventMetadata", {})
-        ptb = float(meta.get("priceToBeat", 0))
-        if ptb > 0:
-            log.info("Got priceToBeat from previous window %s: $%.2f", prev_slug, ptb)
-        return ptb
-
-    except Exception as e:
-        log.debug("Failed to fetch previous window priceToBeat: %s", e)
-        return 0.0
-
 
 async def fetch_active_window(session: aiohttp.ClientSession) -> Optional[MarketWindow]:
     """
@@ -288,25 +253,11 @@ async def market_discovery_loop(state: dict) -> None:
                     )
                     state["window_locked"] = False  # reset trade lock for new window
 
-                # Try to get priceToBeat from previous window if not yet set
-                if window.price_to_beat == 0:
-                    ptb = await _fetch_previous_price_to_beat(session, window.slug)
-                    if ptb > 0:
-                        window.price_to_beat = ptb
-                    else:
-                        # FALLBACK: If the previous window hasn't resolved on the Gamma API,
-                        # and we are strictly inside the new window's time, fetch the EXACT 
-                        # Chainlink Oracle price directly from Polygon (which is what Polymarket uses).
-                        now = datetime.now(timezone.utc)
-                        if now >= window.start_date:
-                            loop = asyncio.get_event_loop()
-                            oracle_price = await loop.run_in_executor(None, fetch_chainlink_btc_sync)
-                            if oracle_price is not None and oracle_price > 0:
-                                window.price_to_beat = oracle_price
-                                log.warning(
-                                    "Gamma API delayed. Fetched strict Chainlink Oracle price %s for %s",
-                                    oracle_price, window.slug
-                                )
+                # Do NOT use aggressive fallbacks for priceToBeat.
+                # Polymarket Gamma API might take 10-60 seconds to accurately resolve 
+                # the exact Chainlink strike price for the start of the window.
+                # If we cache a fake/live alternative here, the math completely breaks.
+                # Let 'price_to_beat' remain 0 until Gamma natively provides it.
 
                 # Preserve priceToBeat from previous iteration (already found)
                 if (window.price_to_beat == 0
