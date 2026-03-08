@@ -206,10 +206,10 @@ async def trade_loop(client: ClobClient, state: dict) -> None:
         seconds_to_close = (window.end_date - now).total_seconds()
         state["seconds_to_close"] = seconds_to_close
 
-        # Check if we should execute a pre-close sell (0.5s before resolution)
+        # Check if we should execute a pre-close sell (configurable limit before resolution)
         if state.get("window_locked", False):
             if not state.get("sell_locked", False) and state.get("position_shares", 0) > 0:
-                if 0.0 < seconds_to_close <= 0.5:
+                if 0.0 < seconds_to_close <= config.PRE_CLOSE_SELL_SECONDS:
                     log.info("PRE-CLOSE AUTO-SELL TRIGGERED: selling %.2f shares", state["position_shares"])
                     sell_token = state["position_token_id"]
                     sell_label = state.get("signal_side", "UNKNOWN")

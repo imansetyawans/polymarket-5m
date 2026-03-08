@@ -26,6 +26,7 @@ EDGE_THRESHOLD: float = float(os.getenv("EDGE_THRESHOLD", "0.07"))
 KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.5"))
 BTC_VOLATILITY_PER_SEC: float = float(os.getenv("BTC_VOLATILITY_PER_SEC", "2.50"))
 ENTRY_SECONDS_BEFORE_CLOSE: float = float(os.getenv("ENTRY_SECONDS_BEFORE_CLOSE", "3.0"))
+PRE_CLOSE_SELL_SECONDS: float = float(os.getenv("PRE_CLOSE_SELL_SECONDS", "0.7"))
 GAP_TRIGGER_PERCENT: float = float(os.getenv("GAP_TRIGGER_PERCENT", "0.0006"))
 
 # ── Contract Addresses (Polygon) ────────────────────────────────

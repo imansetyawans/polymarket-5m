@@ -230,9 +230,9 @@ async def sim_trade_loop(portfolio: SimPortfolio, state: dict) -> None:
 
         # Already traded this window?
         if state.get("window_locked", False):
-            # Check if we should simulate a pre-close sell (0.5s before resolution)
+            # Check if we should simulate a pre-close sell (configurable limit before resolution)
             if not state.get("sell_locked", False) and state.get("position_shares", 0) > 0:
-                if 0.0 < seconds_to_close <= 0.5:
+                if 0.0 < seconds_to_close <= config.PRE_CLOSE_SELL_SECONDS:
                     log.info("SIM PRE-CLOSE AUTO-SELL TRIGGERED")
                     sell_label = state.get("signal_side", "UNKNOWN")
                     # In simulation, we just immediately resolve the trade at the current active price
