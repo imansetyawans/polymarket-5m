@@ -42,6 +42,19 @@ CHAINLINK_ABI = [
         "type": "function",
     },
     {
+        "inputs": [{"name": "_roundId", "type": "uint80"}],
+        "name": "getRoundData",
+        "outputs": [
+            {"name": "roundId", "type": "uint80"},
+            {"name": "answer", "type": "int256"},
+            {"name": "startedAt", "type": "uint256"},
+            {"name": "updatedAt", "type": "uint256"},
+            {"name": "answeredInRound", "type": "uint80"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
         "inputs": [],
         "name": "decimals",
         "outputs": [{"name": "", "type": "uint8"}],
@@ -71,6 +84,35 @@ def fetch_chainlink_btc_sync() -> Optional[float]:
                 return price if price > 0 else None
         except Exception as e:
             log.debug("Chainlink RPC %s failed: %s", rpc, e)
+            continue
+    return None
+
+def fetch_historical_chainlink_btc_sync(target_ts: int) -> Optional[float]:
+    """
+    Synchronously fetches the exact Chainlink BTC/USD price at or immediately preceding target_ts.
+    It linear-searches backwards from latestRoundData to perfectly match the Polymarket start strike.
+    """
+    for rpc in POLYGON_RPCS:
+        try:
+            w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 5}))
+            if w3.is_connected():
+                contract = w3.eth.contract(
+                    address=Web3.to_checksum_address(CHAINLINK_BTC_USD),
+                    abi=CHAINLINK_ABI,
+                )
+                decimals = contract.functions.decimals().call()
+                latest = contract.functions.latestRoundData().call()
+                round_id = latest[0]
+                
+                # Search backwards for up to 300 rounds
+                for i in range(300):
+                    data = contract.functions.getRoundData(round_id - i).call()
+                    up_ts = data[3]
+                    price = data[1] / (10 ** decimals)
+                    if up_ts <= target_ts:
+                        return price
+        except Exception as e:
+            log.debug("Historical Chainlink RPC %s failed: %s", rpc, e)
             continue
     return None
 
@@ -253,12 +295,22 @@ async def market_discovery_loop(state: dict) -> None:
                     )
                     state["window_locked"] = False  # reset trade lock for new window
 
-                # Do NOT use aggressive fallbacks for priceToBeat.
-                # Polymarket Gamma API might take 10-60 seconds to accurately resolve 
-                # the exact Chainlink strike price for the start of the window.
-                # If we cache a fake/live alternative here, the math completely breaks.
-                # Let 'price_to_beat' remain 0 until Gamma natively provides it.
-
+                # Since Polymarket Gamma API might take 10-60+ seconds to accurately resolve 
+                # the exact Chainlink strike price for the start of the window, we actively 
+                # binary-search the Chainlink Oracle historically for the exact start_date.
+                if window.price_to_beat == 0:
+                    now = datetime.now(timezone.utc)
+                    if now >= window.start_date:
+                        target_ts = int(window.start_date.timestamp())
+                        loop = asyncio.get_event_loop()
+                        oracle_price = await loop.run_in_executor(None, fetch_historical_chainlink_btc_sync, target_ts)
+                        if oracle_price is not None and oracle_price > 0:
+                            window.price_to_beat = oracle_price
+                            log.info(
+                                "Accurately fetched historical start-of-window Chainlink Oracle price %s for %s",
+                                oracle_price, window.slug
+                            )
+                
                 # Preserve priceToBeat from previous iteration (already found)
                 if (window.price_to_beat == 0
                         and old is not None
