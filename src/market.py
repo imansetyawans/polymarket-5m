@@ -104,13 +104,19 @@ def fetch_historical_chainlink_btc_sync(target_ts: int) -> Optional[float]:
                 latest = contract.functions.latestRoundData().call()
                 round_id = latest[0]
                 
+                found_price = None
                 # Search backwards for up to 300 rounds
                 for i in range(300):
                     data = contract.functions.getRoundData(round_id - i).call()
                     up_ts = data[3]
                     price = data[1] / (10 ** decimals)
-                    if up_ts <= target_ts:
-                        return price
+                    if up_ts < target_ts:
+                        # We crossed the start time boundary backwards.
+                        # The very FIRST round at or after the boundary was stored in found_price
+                        return found_price
+                    else:
+                        # Keep track of the oldest round we've seen that is still >= target_ts
+                        found_price = price
         except Exception as e:
             log.debug("Historical Chainlink RPC %s failed: %s", rpc, e)
             continue
