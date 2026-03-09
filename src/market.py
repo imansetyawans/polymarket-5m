@@ -63,7 +63,8 @@ CHAINLINK_ABI = [
     },
 ]
 
-POLYGON_RPCS = [
+POLYGON_RPCS = [config.POLYGON_RPC_URL] if config.POLYGON_RPC_URL else []
+POLYGON_RPCS += [
     "https://polygon.drpc.org",
     "https://polygon-bor-rpc.publicnode.com",
 ]

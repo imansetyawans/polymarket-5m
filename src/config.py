@@ -14,12 +14,13 @@ load_dotenv()
 POLY_PRIVATE_KEY: str = os.getenv("POLY_PRIVATE_KEY", "")
 POLY_FUNDER_ADDRESS: str = os.getenv("POLY_FUNDER_ADDRESS", "")
 CHAIN_ID: int = 137  # Polygon Mainnet
-SIGNATURE_TYPE: int = 2  # Polymarket Proxy (Smart Wallet)
+SIGNATURE_TYPE: int = int(os.getenv("SIGNATURE_TYPE", "2"))  # 0 = EOA, 2 = Polymarket Proxy
 
 # ── API Hosts ────────────────────────────────────────────────────
 CLOB_HOST: str = "https://clob.polymarket.com"
 GAMMA_API_HOST: str = "https://gamma-api.polymarket.com"
 BINANCE_BTC_URL: str = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
+POLYGON_RPC_URL: str = os.getenv("POLYGON_RPC_URL", "")
 
 # ── Quantitative Strategy Settings ───────────────────────────────
 EDGE_THRESHOLD: float = float(os.getenv("EDGE_THRESHOLD", "0.07"))

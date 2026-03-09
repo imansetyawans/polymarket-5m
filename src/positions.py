@@ -75,7 +75,29 @@ async def redeem_positions(redeemable: List[dict]) -> int:
         return 0
 
     try:
-        w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
+        # Use a rotation of public RPCs (including private one if provided)
+        rpcs = [config.POLYGON_RPC_URL] if config.POLYGON_RPC_URL else []
+        rpcs += [
+            "https://polygon-bor-rpc.publicnode.com",
+            "https://polygon.llamarpc.com",
+            "https://1rpc.io/matic",
+        ]
+        
+        w3 = None
+        for url in rpcs:
+            try:
+                temp_w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": 10}))
+                if temp_w3.is_connected():
+                    w3 = temp_w3
+                    log.info("Redeem: Connected via %s", url)
+                    break
+            except:
+                continue
+        
+        if not w3:
+            log.error("Redeem: Failed to connect to any RPC")
+            return 0
+            
         account = w3.eth.account.from_key(config.POLY_PRIVATE_KEY)
         ct = w3.eth.contract(
             address=Web3.to_checksum_address(config.CONDITIONAL_TOKENS_ADDRESS),
@@ -85,6 +107,10 @@ async def redeem_positions(redeemable: List[dict]) -> int:
         redeemed = 0
         parent_collection = bytes(32)  # 0x0...0
         usdc = Web3.to_checksum_address(config.USDC_ADDRESS)
+        
+        # Get starting nonce
+        base_nonce = w3.eth.get_transaction_count(account.address)
+        tx_index = 0
 
         for pos in redeemable:
             condition_id = pos.get("conditionId", pos.get("condition_id", ""))
@@ -104,13 +130,12 @@ async def redeem_positions(redeemable: List[dict]) -> int:
             index_sets = [1, 2]
 
             try:
-                nonce = w3.eth.get_transaction_count(account.address)
                 tx = ct.functions.redeemPositions(
                     usdc, parent_collection, cid_bytes, index_sets
                 ).build_transaction(
                     {
                         "from": account.address,
-                        "nonce": nonce,
+                        "nonce": base_nonce + tx_index,
                         "gas": 200_000,
                         "gasPrice": w3.eth.gas_price,
                         "chainId": config.CHAIN_ID,
@@ -118,6 +143,7 @@ async def redeem_positions(redeemable: List[dict]) -> int:
                 )
                 signed = account.sign_transaction(tx)
                 tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+                tx_index += 1
                 receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
 
                 if receipt["status"] == 1:

@@ -15,7 +15,9 @@ Built with Python, Rich, and the Polymarket CLOB API.
 - 📊 **Real-time TUI dashboard** — Countdown, orderbook streaming, edge calculation, live PnL 
 - ₿ **Binance Live Ticker** — Sub-second exact BTC price sync (zero on-chain lag)
 - 🎮 **Simulation Mode** — Paper trade with virtual balance and live data
-- 🛡️ **Proxy Wallet System** — Gas-less relayer trading instantly directly from deposited USDC
+- 🛡️ **EOA & Proxy Support** — Trade directly from your wallet or via Polymarket Proxy
+- 🔄 **Auto-Redeem Winnings** — Automatically claims winning positions back to USDC
+- ⚡ **Private RPC Support** — Prioritizes Alchemy/Custom RPCs for high-speed execution
 - 🚀 **FAK Execution** — Dynamic Fill-and-Kill market orders to safely snipe shallow liquidity
 
 ## Quick Start
@@ -45,16 +47,19 @@ cp .env.example .env
 Edit `.env` with your credentials:
 
 ```env
-# Required for live trading only (not needed for --sim or --dry-run)
+# Required for live trading only
 POLY_PRIVATE_KEY=your_private_key_here
-POLY_FUNDER_ADDRESS=your_wallet_address_here
+POLY_FUNDER_ADDRESS=your_direct_wallet_address
 
-# Proxy Wallet vs. EOA
-SIGNATURE_TYPE=2                # 2 = Proxy Smart Wallet (No Gas Fees), 0 = EOA (Requires MATIC)
+# Signature Type
+SIGNATURE_TYPE=0                # 0 = EOA (Direct), 2 = Polymarket Proxy
+
+# Private RPC (Recommended for speed)
+POLYGON_RPC_URL=https://polygon-mainnet.g.alchemy.com/v2/your-key
 
 # Quantitative Strategy
-TRADE_AMOUNT_MODE=percent       # "percent" or "fixed"
-TRADE_AMOUNT_VALUE=50           # Scales Kelly fraction (e.g., 50% = Half-Kelly betting)
+EDGE_THRESHOLD=0.07             # 7% edge minimum
+KELLY_FRACTION=0.5              # Half-Kelly betting
 ```
 
 ### 3. Run
@@ -63,16 +68,13 @@ TRADE_AMOUNT_VALUE=50           # Scales Kelly fraction (e.g., 50% = Half-Kelly 
 # 🎮 Simulation (recommended to start) — $10 virtual balance
 python -m src.main --sim
 
-# 🎮 Simulation with custom balance
-python -m src.main --sim 50
-
 # 👀 Dry run — dashboard only, no trades
 python -m src.main --dry-run
 
 # 🚀 Live trading
 python -m src.main
 
-# 🔑 First-time setup — approve USDC token allowance
+# 🔑 First-time EOA setup — approve USDC token allowance
 python -m src.main --approve
 ```
 
@@ -129,24 +131,44 @@ The bot has been deeply updated to support `SIGNATURE_TYPE=2`. This seamlessly p
 
 ---
 
+## Technical Architecture
+
+### Live Price & Market Data
+- **High-Speed Execution**: The bot prioritizes `POLYGON_RPC_URL` from your `.env` for all on-chain operations (approvals, redemptions). It includes an automatic **RPC Rotation** fallback to ensure 100% uptime.
+- **Binance Feed**: Real-time BTC price is pulled from Binance REST/WebSocket to ensure zero-lag compared to on-chain oracles.
+- **Gamma API**: Used for discovering active market windows and resolving results.
+
+### Auto-Redeem System
+The bot features a background redemption engine (`src/positions.py`):
+1. Monitors open positions for "Resolved" status.
+2. Identifies winning outcomes.
+3. Automatically executes `redeemPositions` on the Polymarket contract using your private RPC.
+4. Corrects for sequential nonces to ensure multiple wins are claimed instantly.
+
+### EOA vs Proxy Mode
+- **EOA (`SIGNATURE_TYPE=0`)**: Trades directly from your main wallet. Faster execution but requires MATIC for gas and a one-time `--approve` call.
+- **Proxy (`SIGNATURE_TYPE=2`)**: Uses Polymarket's smart wallet. Gas-less trading handled by Polymarket relayers, but may have slight relayer latency.
+
+---
+
 ## Project Structure
 
 ```
 poly-tui/
 ├── src/
 │   ├── main.py          # Entry point & async orchestrator
-│   ├── config.py        # Environment config loader
-│   ├── auth.py          # Polymarket client & Proxy Wallet authentication
-│   ├── market.py        # Market window discovery (Gamma API)
-│   ├── price_feed.py    # Sub-second BTC precise ticker feed (Binance API)
-│   ├── strategy.py      # Edge, Expected Value, Kelly Criterion computations
-│   ├── trader.py        # FAK live CLOB order execution logic
+│   ├── config.py        # Environment config loader (supports private RPC)
+│   ├── auth.py          # EOA/Proxy Auth & Multi-RPC approval logic
+│   ├── market.py        # Market window discovery & RPC fallback
+│   ├── price_feed.py    # Sub-second BTC precise ticker feed
+│   ├── strategy.py      # Quantum Edge & Kelly Criterion math
+│   ├── trader.py        # FAK market order execution
 │   ├── sim_trader.py    # Simulation trader with virtual portfolio
-│   ├── positions.py     # Position tracking & redemption
-│   ├── equity.py        # USDC balance & equity calculation
-│   ├── dashboard.py     # Rich TUI dashboard renderer
-│   └── logger.py        # Logging setup with in-memory buffer
-├── .env.example         # Environment template
+│   ├── positions.py     # Background Auto-Redeem engine
+│   ├── equity.py        # USDC & Equity tracking
+│   ├── dashboard.py     # Rich TUI dashboard
+│   └── logger.py        # Logging with in-memory buffer
+├── .env.example         # Updated environment template
 ├── requirements.txt     # Python dependencies
 └── README.md
 ```
@@ -156,18 +178,18 @@ poly-tui/
 ## Requirements
 
 - Python 3.10+
-- Polygon wallet with USDC (for live trading only)
-- Internet connection (for Polymarket APIs and Chainlink oracle)
+- Polygon wallet with **USDC.e** (Bridged USDC)
+- **MATIC** (if using EOA mode)
+- [Alchemy](https://www.alchemy.com/) or [Infura](https://www.infura.io/) RPC (Optional but highly recommended)
 
 ### Key Dependencies
 
 | Package | Purpose |
 |---------|---------|
 | `py-clob-client` | Polymarket CLOB API client |
-| `web3` | Chainlink oracle reads on Polygon |
+| `web3` | On-chain interactions (Approvals/Redeem) |
 | `rich` | Terminal UI dashboard |
-| `aiohttp` | Async HTTP for Gamma API |
-| `python-dotenv` | Environment configuration |
+| `aiohttp` | Async HTTP for APIs |
 
 ---
 
@@ -178,7 +200,6 @@ poly-tui/
 | Gamma | `GET /events?slug=...` | Market window discovery |
 | CLOB | `GET /midpoint?token_id=...` | UP/DOWN token odds |
 | CLOB | `POST /order` | Trade execution (live only) |
-| Chainlink | Polygon contract call | BTC/USD price oracle |
 
 ---
 
