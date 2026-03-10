@@ -157,12 +157,12 @@ async def _execute_market_order(
 
             if "reject" in str(status).lower() or "fail" in str(status).lower():
                 reason = resp.get("message", "") if isinstance(resp, dict) else str(resp)
-                log.warning("FAK REJECTED: %s — skipping window (no retry)", reason)
+                log.warning("FAK REJECTED: %s — skipping window", reason)
                 state["last_trade"] = f"REJECTED — {reason}"
-                return None  # Hard rejection -> Lock window
+            else:
+                state["last_trade"] = f"BUY {token_label} ${trade_size:.2f} | {status}"
 
-            state["last_trade"] = f"BUY {token_label} ${trade_size:.2f} | {status}"
-            return True  # Success -> Lock window
+            return True
 
         except Exception as e:
             last_exc = e
@@ -176,22 +176,22 @@ async def _execute_market_order(
                 await asyncio.sleep(RETRY_DELAY_SECONDS)
                 continue
 
-            # Balance/allowance error → don't lock window
+            # Balance/allowance error
             if _is_balance_error(e):
                 log.error("FAK order failed: %s — balance issue, will retry next window", e)
                 state["last_trade"] = f"BALANCE ERROR — {e}"
-                return False  # Definitely no fill -> Don't lock window
+                return True
 
-            # No match (empty orderbook) → don't lock window
+            # No match (empty orderbook)
             if _is_no_match_error(e):
-                log.warning("FAK order: no matching orders in book — will retry next tick")
+                log.warning("FAK order: no matching orders in book — skipping window")
                 state["last_trade"] = "NO MATCH — empty orderbook"
-                return False  # Definitely no fill -> Don't lock window
+                return True
 
-            # Unknown/permanent error → give up
+            # Unknown/permanent error
             log.error("FAK order failed: %s — skipping window", e)
             state["last_trade"] = f"ERROR — {e}"
-            return None  # Ambiguous/Hard error -> Lock window for safety
+            return True
 
     # All retries exhausted (only transient errors reach here)
     log.error(
@@ -199,7 +199,7 @@ async def _execute_market_order(
         MAX_ORDER_RETRIES, last_exc,
     )
     state["last_trade"] = f"NETWORK ERROR — {last_exc} (retries exhausted)"
-    return None  # Ambiguous error -> Lock window for safety
+    return True
 
 
 async def _execute_sell_order(
@@ -418,18 +418,16 @@ async def trade_loop(client: ClobClient, state: dict) -> None:
                     exact_signal.side, exact_signal.price, exact_signal.edge * 100, exact_signal.ev, exact_signal.kelly_size
                 )
                 
-                success_status = await _execute_market_order(client, token_id, exact_signal.side, exact_signal.kelly_size, state)
+                success = await _execute_market_order(client, token_id, exact_signal.side, exact_signal.kelly_size, state)
                 
-                # Window locking logic:
-                # - True: success -> Lock
-                # - None: ambiguous/hard error -> Lock for safety
-                # - False: definitely no order placed (no match/balance) -> DON'T lock, retry next tick
-                if success_status is not False:
-                    state["window_locked"] = True
-                    log.info("Window locked — no further buys this window")
-                    
-                    if success_status is True:
-                        state["position_token_id"] = token_id
+                # ALWAYS lock after any trade attempt.
+                # Reverting to safety-first approach to prevent any possibility of buy-cascades.
+                state["window_locked"] = True
+                log.info("Window locked — no further buys this window")
+                
+                if success:
+                    state["position_token_id"] = token_id
+                    state["position_shares"] = 999999.0  # FAK sell-all trick
                     state["position_shares"] = 999999.0  # FAK sell-all trick
             else:
                 log.info("SIGNAL SKIP: %s", signal.reason)
