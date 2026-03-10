@@ -40,10 +40,14 @@ def approve_usdc():
     log.info("Wallet Address: %s", acct.address)
 
     # Contract Addresses
-    usdc_address = w3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")  # USDC.e on Polygon
-    exchange_address = w3.to_checksum_address(config.EXCHANGE_ADDRESS)
-
-    log.info("Checking current allowance for Polymarket Exchange: %s", exchange_address)
+    usdc_address = w3.to_checksum_address(config.USDC_ADDRESS)
+    
+    # List of spenders to approve
+    spenders = [
+        ("Standard Exchange", config.EXCHANGE_ADDRESS),
+        ("Neg Risk Exchange", config.NEG_RISK_EXCHANGE_ADDRESS),
+        ("Neg Risk Adapter", config.NEG_RISK_ADAPTER_ADDRESS),
+    ]
 
     # Minimal ERC20 ABI for allowance & approve
     abi = [
@@ -60,7 +64,7 @@ def approve_usdc():
             "constant": False, 
             "inputs": [{"name": "spender", "type": "address"}, {"name": "value", "type": "uint256"}], 
             "name": "approve", 
-            "outputs": [{"name": "", "type": "bool"}], 
+            "outputs": [{"name": "", "type": "uint256"}], 
             "payable": False, 
             "stateMutability": "nonpayable", 
             "type": "function"
@@ -68,46 +72,38 @@ def approve_usdc():
     ]
 
     usdc = w3.eth.contract(address=usdc_address, abi=abi)
-    
-    # Check existing allowance
-    current_allowance = usdc.functions.allowance(acct.address, exchange_address).call()
-    
-    # We want max allowance
     max_amount = 2**256 - 1
     
-    if current_allowance >= (max_amount / 2):
-        log.info("Wallet already has sufficient allowance approved! No action needed.")
-        return
+    for name, addr in spenders:
+        spender_address = w3.to_checksum_address(addr)
+        log.info("--- Checking %s: %s ---", name, spender_address)
         
-    log.info("Allowance is insufficient. Building approval transaction...")
+        try:
+            current_allowance = usdc.functions.allowance(acct.address, spender_address).call()
+            if current_allowance >= (max_amount / 2):
+                log.info("  %s already has sufficient allowance.", name)
+                continue
+                
+            log.info("  Building approval for %s...", name)
+            tx = usdc.functions.approve(spender_address, max_amount).build_transaction({
+                "from": acct.address,
+                "nonce": w3.eth.get_transaction_count(acct.address),
+                "gas": 100000,
+                "gasPrice": w3.eth.gas_price
+            })
 
-    # Build Transaction
-    tx = usdc.functions.approve(exchange_address, max_amount).build_transaction({
-        "from": acct.address,
-        "nonce": w3.eth.get_transaction_count(acct.address),
-        "gas": 100000,
-        "gasPrice": w3.eth.gas_price
-    })
+            signed = w3.eth.account.sign_transaction(tx, priv)
+            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+            log.info("  Sent! Tx Hash: %s", tx_hash.hex())
+            
+            # Wait for receipt to avoid nonce collisions
+            w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+            log.info("  %s Approved!", name)
+            
+        except Exception as e:
+            log.error("  Error approving %s: %s", name, e)
 
-    log.info("Signing transaction...")
-    signed = w3.eth.account.sign_transaction(tx, priv)
-    
-    log.info("Broadcasting transaction...")
-    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-    
-    log.info("Sent! Transaction Hash: %s", tx_hash.hex())
-    log.info("Waiting for network confirmation (this may take 10-30 seconds)...")
-
-    # Wait for receipt
-    try:
-        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-        if receipt.status == 1:
-            log.info("SUCCESS! Transaction confirmed in block %d.", receipt.blockNumber)
-            log.info("Your wallet is now fully approved for the Polymarket bot.")
-        else:
-            log.error("Transaction FAILED! Status: %d. Check block explorer.", receipt.status)
-    except Exception as e:
-        log.error("Error waiting for transaction receipt: %s", e)
+    log.info("--- All approvals completed! ---")
 
 
 if __name__ == "__main__":
