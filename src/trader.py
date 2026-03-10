@@ -93,7 +93,12 @@ async def _execute_market_order(
     from src.equity import get_usdc_balance
 
     usdc_balance = get_usdc_balance(client)
-    usdc_cap = usdc_balance * 0.98  # leave 2% buffer for rounding/gas
+    
+    # Polymarket subtracts fees (up to 2%) ON TOP of the Maker Amount for Market BUYs.
+    # Therefore, the maximum trade size we can safely submit without hitting an
+    # "insufficient balance" error is exactly `(usdc_balance / 1.02)`.
+    # We use 1.025 to leave a safe slippage/rounding buffer.
+    usdc_cap = usdc_balance / 1.025
 
     if trade_size > usdc_cap:
         if usdc_cap < MIN_ORDER_SIZE:
@@ -104,7 +109,7 @@ async def _execute_market_order(
             state["last_trade"] = f"SKIPPED — USDC balance ${usdc_balance:.2f} too low"
             return False
         log.warning(
-            "Capping trade size from $%.2f to $%.2f (USDC balance: $%.2f)",
+            "Capping trade size from $%.2f to MAX $%.2f (to account for 2%% fees on $%.2f balance)",
             trade_size, usdc_cap, usdc_balance,
         )
         trade_size = round(usdc_cap, 2)
