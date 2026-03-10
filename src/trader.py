@@ -48,6 +48,31 @@ def _get_token_prices(client: ClobClient, up_token: str, down_token: str) -> dic
 
 
 
+# Maximum retries for transient network errors
+MAX_ORDER_RETRIES = 3
+RETRY_DELAY_SECONDS = 0.5
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """Check if a PolyApiException is a transient network error (retriable)."""
+    err_str = str(exc).lower()
+    status_code = getattr(exc, "status_code", None)
+    # status_code=None with 'request exception' → network/timeout issue
+    if status_code is None and "request exception" in err_str:
+        return True
+    return False
+
+
+def _is_balance_error(exc: Exception) -> bool:
+    """Check if a PolyApiException is a balance/allowance error."""
+    return "not enough balance" in str(exc).lower()
+
+
+def _is_no_match_error(exc: Exception) -> bool:
+    """Check if a PolyApiException is a 'no orders found to match' error."""
+    return "no orders found to match" in str(exc).lower()
+
+
 async def _execute_market_order(
     client: ClobClient,
     token_id: str,
@@ -58,7 +83,32 @@ async def _execute_market_order(
     """
     Execute a Fill-and-Kill (FAK) market order.
     Returns True if order was placed (regardless of fill), False on error.
+
+    Error handling:
+      - Balance/allowance errors: pre-checked, capped to real USDC balance.
+      - Transient network errors: retried up to MAX_ORDER_RETRIES times.
+      - No match (empty orderbook): returns False without locking.
     """
+    # ── Pre-validate USDC balance ────────────────────────────────────
+    from src.equity import get_usdc_balance
+
+    usdc_balance = get_usdc_balance(client)
+    usdc_cap = usdc_balance * 0.98  # leave 2% buffer for rounding/gas
+
+    if trade_size > usdc_cap:
+        if usdc_cap < MIN_ORDER_SIZE:
+            log.warning(
+                "USDC balance $%.2f too low to place minimum order — skipping",
+                usdc_balance,
+            )
+            state["last_trade"] = f"SKIPPED — USDC balance ${usdc_balance:.2f} too low"
+            return False
+        log.warning(
+            "Capping trade size from $%.2f to $%.2f (USDC balance: $%.2f)",
+            trade_size, usdc_cap, usdc_balance,
+        )
+        trade_size = round(usdc_cap, 2)
+
     if trade_size < MIN_ORDER_SIZE:
         log.warning(
             "Trade size $%.2f below minimum $%.2f — skipping this window",
@@ -67,49 +117,84 @@ async def _execute_market_order(
         state["last_trade"] = f"SKIPPED — size ${trade_size:.2f} below minimum"
         return False
 
-    try:
-        log.info(
-            "Placing FAK BUY %s | size=$%.2f | token=%s...",
-            token_label, trade_size, token_id[:16],
-        )
+    # ── Place order with retry logic ─────────────────────────────────
+    last_exc = None
+    for attempt in range(1, MAX_ORDER_RETRIES + 1):
+        try:
+            log.info(
+                "Placing FAK BUY %s | size=$%.2f | token=%s... (attempt %d/%d)",
+                token_label, trade_size, token_id[:16], attempt, MAX_ORDER_RETRIES,
+            )
 
-        # Create market order — amount is in USDC
-        order_args = MarketOrderArgs(
-            token_id=token_id,
-            amount=trade_size,
-            side=BUY,
-            order_type=OrderType.FAK
-        )
+            # Create market order — amount is in USDC
+            order_args = MarketOrderArgs(
+                token_id=token_id,
+                amount=trade_size,
+                side=BUY,
+                order_type=OrderType.FAK
+            )
 
-        signed = client.create_market_order(order_args)
-        resp = client.post_order(signed, orderType=OrderType.FAK)
+            signed = client.create_market_order(order_args)
+            resp = client.post_order(signed, orderType=OrderType.FAK)
 
-        # Parse response
-        if isinstance(resp, dict):
-            status = resp.get("status", resp.get("orderStatus", "UNKNOWN"))
-            order_id = resp.get("orderID", resp.get("id", ""))
-        else:
-            status = str(resp)
-            order_id = ""
+            # Parse response
+            if isinstance(resp, dict):
+                status = resp.get("status", resp.get("orderStatus", "UNKNOWN"))
+                order_id = resp.get("orderID", resp.get("id", ""))
+            else:
+                status = str(resp)
+                order_id = ""
 
-        log.info(
-            "FAK order result: status=%s | order=%s",
-            status, order_id[:16] if order_id else "N/A",
-        )
+            log.info(
+                "FAK order result: status=%s | order=%s",
+                status, order_id[:16] if order_id else "N/A",
+            )
 
-        if "reject" in str(status).lower() or "fail" in str(status).lower():
-            reason = resp.get("message", "") if isinstance(resp, dict) else str(resp)
-            log.warning("FAK REJECTED: %s — skipping window (no retry)", reason)
-            state["last_trade"] = f"REJECTED — {reason}"
-        else:
-            state["last_trade"] = f"BUY {token_label} ${trade_size:.2f} | {status}"
+            if "reject" in str(status).lower() or "fail" in str(status).lower():
+                reason = resp.get("message", "") if isinstance(resp, dict) else str(resp)
+                log.warning("FAK REJECTED: %s — skipping window (no retry)", reason)
+                state["last_trade"] = f"REJECTED — {reason}"
+            else:
+                state["last_trade"] = f"BUY {token_label} ${trade_size:.2f} | {status}"
 
-        return True
+            return True
 
-    except Exception as e:
-        log.error("FAK order failed: %s — skipping window", e)
-        state["last_trade"] = f"ERROR — {e}"
-        return False
+        except Exception as e:
+            last_exc = e
+
+            # Transient network error → retry
+            if _is_transient_error(e) and attempt < MAX_ORDER_RETRIES:
+                log.warning(
+                    "FAK order attempt %d/%d failed (transient): %s — retrying in %.1fs",
+                    attempt, MAX_ORDER_RETRIES, e, RETRY_DELAY_SECONDS,
+                )
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
+                continue
+
+            # Balance/allowance error → don't lock window
+            if _is_balance_error(e):
+                log.error("FAK order failed: %s — balance issue, will retry next window", e)
+                state["last_trade"] = f"BALANCE ERROR — {e}"
+                return False
+
+            # No match (empty orderbook) → don't lock window
+            if _is_no_match_error(e):
+                log.warning("FAK order: no matching orders in book — will retry next tick")
+                state["last_trade"] = "NO MATCH — empty orderbook"
+                return False
+
+            # Unknown/permanent error → give up
+            log.error("FAK order failed: %s — skipping window", e)
+            state["last_trade"] = f"ERROR — {e}"
+            return False
+
+    # All retries exhausted (only transient errors reach here)
+    log.error(
+        "FAK order failed after %d attempts: %s — skipping window",
+        MAX_ORDER_RETRIES, last_exc,
+    )
+    state["last_trade"] = f"NETWORK ERROR — {last_exc} (retries exhausted)"
+    return False
 
 
 async def _execute_sell_order(
@@ -243,9 +328,10 @@ async def trade_loop(client: ClobClient, state: dict) -> None:
             await asyncio.sleep(0.5)
             continue
 
-        # Get balance for Kelly sizing
+        # Get balance for Kelly sizing — use only spendable USDC, not total equity
+        # (total equity includes unredeemed winning positions which aren't spendable)
         equity = get_total_equity(client, positions)
-        total_balance = equity["total"]
+        total_balance = equity["usdc_balance"]
 
         # Run quantitative model
         signal = evaluate_market(
@@ -328,7 +414,8 @@ async def trade_loop(client: ClobClient, state: dict) -> None:
                 )
                 
                 success = await _execute_market_order(client, token_id, exact_signal.side, exact_signal.kelly_size, state)
-                state["window_locked"] = True
+                if success:
+                    state["window_locked"] = True
                 
                 # To sell the tokens back, we need to know exactly how many we bought
                 # We estimate shares by dividing Kelly size / execution price.  
