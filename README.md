@@ -62,7 +62,15 @@ EDGE_THRESHOLD=0.07             # 7% edge minimum
 KELLY_FRACTION=0.5              # Half-Kelly betting
 ```
 
-### 3. Run
+### 3. Approve USDC (Important)
+
+If you are using a new wallet, you MUST grant the Polymarket Exchange contract permission to spend your USDC. Run the built-in Web3 approval script:
+
+```bash
+python -m src.approve
+```
+
+### 4. Run
 
 ```bash
 # 🎮 Simulation (recommended to start) — $10 virtual balance
@@ -73,9 +81,6 @@ python -m src.main --dry-run
 
 # 🚀 Live trading
 python -m src.main
-
-# 🔑 First-time EOA setup — approve USDC token allowance
-python -m src.main --approve
 ```
 
 Press `Ctrl+C` to stop.
@@ -166,6 +171,7 @@ poly-tui/
 │   ├── sim_trader.py    # Simulation trader with virtual portfolio
 │   ├── positions.py     # Background Auto-Redeem engine
 │   ├── equity.py        # USDC & Equity tracking
+│   ├── approve.py       # Automated Web3 USDC allowance approval
 │   ├── dashboard.py     # Rich TUI dashboard
 │   └── logger.py        # Logging with in-memory buffer
 ├── .env.example         # Updated environment template
