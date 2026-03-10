@@ -12,20 +12,30 @@ log = logging.getLogger("polybot")
 
 
 def get_usdc_balance(client: ClobClient) -> float:
-    """Fetch USDC liquid balance from the CLOB API."""
+    """Fetch USDC liquid balance from the CLOB API, capped by allowance."""
     try:
         params = BalanceAllowanceParams(
             asset_type=AssetType.COLLATERAL,
             signature_type=config.SIGNATURE_TYPE,
         )
-        balance = client.get_balance_allowance(params)
-        if isinstance(balance, dict):
-            raw = float(balance.get("balance", 0))
+        resp = client.get_balance_allowance(params)
+        if isinstance(resp, dict):
+            raw_balance = float(resp.get("balance", 0))
+            
+            # Find the highest relevant allowance
+            allowances = resp.get("allowances", {})
+            max_allowance = 0.0
+            if allowances:
+                max_allowance = max(float(val) for val in allowances.values())
+            
+            # The usable balance is the minimum of what we have and what we're allowed to spend
+            usable_raw = min(raw_balance, max_allowance)
+            
             # USDC has 6 decimals — convert from atomic if needed
-            return raw / 1e6 if raw > 1_000_000 else raw
-        return float(balance) if balance else 0.0
+            return usable_raw / 1e6 if usable_raw > 1_000_000 else usable_raw
+        return float(resp) if resp else 0.0
     except Exception as e:
-        log.error("Failed to fetch USDC balance: %s", e)
+        log.error("Failed to fetch USDC balance/allowance: %s", e)
         return 0.0
 
 

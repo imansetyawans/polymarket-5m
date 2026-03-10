@@ -414,8 +414,12 @@ async def trade_loop(client: ClobClient, state: dict) -> None:
                 )
                 
                 success = await _execute_market_order(client, token_id, exact_signal.side, exact_signal.kelly_size, state)
-                if success:
-                    state["window_locked"] = True
+                
+                # ALWAYS lock after any trade attempt — retries are handled
+                # inside _execute_market_order (3 attempts). The outer loop
+                # must never re-evaluate and place additional orders.
+                state["window_locked"] = True
+                log.info("Window locked — no further buys this window")
                 
                 # To sell the tokens back, we need to know exactly how many we bought
                 # We estimate shares by dividing Kelly size / execution price.  
@@ -425,8 +429,6 @@ async def trade_loop(client: ClobClient, state: dict) -> None:
                 if success:
                     state["position_token_id"] = token_id
                     state["position_shares"] = 999999.0  # FAK sell-all trick
-                    
-                log.info("Window locked — no further buys this window")
             else:
                 log.info("SIGNAL SKIP: %s", signal.reason)
         else:
