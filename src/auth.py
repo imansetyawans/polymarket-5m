@@ -116,12 +116,14 @@ def approve_allowances() -> None:
             )
             signed = account.sign_transaction(tx)
             tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-            # We don't wait for each receipt to speed up, but we log the hash
             log.info("  Sent approve(%s → %s) tx=%s", token_addr[:10], spender_addr[:10], tx_hash.hex())
+            
+            # Wait for each receipt to ensure Polygon doesn't drop consecutive transactions
+            try:
+                w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+            except Exception as e:
+                log.warning("  Timeout or error waiting for receipt: %s", e)
+                
             tx_index += 1
-
-    log.info("All approval transactions sent! Waiting for final confirmation...")
-    # Wait for the last one to ensure completion
-    w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
 
     log.info("All allowances set successfully!")
