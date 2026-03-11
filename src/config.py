@@ -43,6 +43,11 @@ POSITION_POLL_INTERVAL: int = 1  # seconds
 MARKET_RETRY_INTERVAL: int = 1  # seconds when idle
 PRICE_FEED_INTERVAL: float = 1.0  # seconds
 
+# ── Cooldown ─────────────────────────────────────────────────────
+COOLDOWN_START_TIME: str = os.getenv("COOLDOWN_START_TIME", "10:00")
+COOLDOWN_END_TIME: str = os.getenv("COOLDOWN_END_TIME", "11:59")
+COOLDOWN_TIMEZONE: str = os.getenv("COOLDOWN_TIMEZONE", "US/Eastern")
+
 
 def validate_trading_config() -> None:
     """

@@ -19,6 +19,7 @@ Built with Python, Rich, and the Polymarket CLOB API.
 - 🔄 **Auto-Redeem Winnings** — Automatically claims winning positions back to USDC
 - ⚡ **Private RPC Support** — Prioritizes Alchemy/Custom RPCs for high-speed execution
 - 🚀 **FAK Execution** — Dynamic Fill-and-Kill market orders to safely snipe shallow liquidity
+- 🧊 **Configurable Cooldown** — Prevents trading during specific hours (e.g., 10:00 - 11:59 ET)
 
 ## Quick Start
 
@@ -134,6 +135,12 @@ Orders execute against the live Polymarket Central Limit Order Book (CLOB). To p
 ### Proxy Smart Wallet Trading
 The bot has been deeply updated to support `SIGNATURE_TYPE=2`. This seamlessly passes trades through Polymarket's relayer network natively utilizing deposited USDC funds without enforcing manually injected MATIC gas fees.
 
+### Configurable Cooldown Period
+To avoid trading during high-volatility or undesired market hours, the bot includes a configurable cooldown window.
+- **Environment Driven**: Settings are managed via `.env` (`COOLDOWN_START_TIME`, `COOLDOWN_END_TIME`, `COOLDOWN_TIMEZONE`).
+- **Timezone Aware**: Uses internal timezone conversion to match specified market hours exactly.
+- **Sleep Logic**: The bot enters a low-frequency poll state during cooldown to save resources.
+
 ---
 
 ## Technical Architecture
@@ -168,6 +175,7 @@ poly-tui/
 │   ├── price_feed.py    # Sub-second BTC precise ticker feed
 │   ├── strategy.py      # Quantum Edge & Kelly Criterion math
 │   ├── trader.py        # FAK market order execution
+│   ├── utils.py         # Timezone-aware cooldown logic
 │   ├── sim_trader.py    # Simulation trader with virtual portfolio
 │   ├── positions.py     # Background Auto-Redeem engine
 │   ├── equity.py        # USDC & Equity tracking

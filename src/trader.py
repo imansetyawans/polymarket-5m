@@ -285,8 +285,21 @@ async def trade_loop(client: ClobClient, state: dict) -> None:
     """
     from src.strategy import evaluate_market
     from src.equity import get_total_equity
+    from src.utils import is_in_cooldown
 
     while True:
+        # ── Cooldown Check ───────────────────────────────────────────
+        if is_in_cooldown():
+            state["cooldown_active"] = True
+            log.info("Trading Cooldown Active (%s - %s %s)", 
+                     config.COOLDOWN_START_TIME, 
+                     config.COOLDOWN_END_TIME, 
+                     config.COOLDOWN_TIMEZONE)
+            state["last_trade"] = f"COOLDOWN — {config.COOLDOWN_START_TIME}-{config.COOLDOWN_END_TIME}"
+            await asyncio.sleep(60) # Sleep longer during cooldown
+            continue
+        
+        state["cooldown_active"] = False
         window = state.get("window")
         if not window:
             await asyncio.sleep(0.5)
