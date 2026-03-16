@@ -46,6 +46,10 @@ def get_w3() -> Web3:
         "https://polygon-bor-rpc.publicnode.com",
         "https://polygon.llamarpc.com",
         "https://1rpc.io/matic",
+        "https://polygon-rpc.com",
+        "https://rpc-mainnet.matic.network",
+        "https://rpc-mainnet.maticvigil.com",
+        "https://polygon.drpc.org",
     ]
     for url in rpcs:
         try:
