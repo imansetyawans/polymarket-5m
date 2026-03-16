@@ -3,10 +3,10 @@
 import asyncio
 from py_clob_client.client import ClobClient
 from src.positions import get_w3, fetch_positions, find_redeemable, redeem_positions
-from src.auth import build_clob_client
+from src.auth import create_client
 
 async def main():
-    client = build_clob_client()
+    client = create_client()
     w3 = get_w3()
 
     if not w3:
